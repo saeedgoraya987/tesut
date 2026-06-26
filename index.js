@@ -61,14 +61,24 @@ function delay(seconds) {
 // ============ URL FUNCTIONS ============
 function getCountryUrl(country) {
   if (!countries.includes(country)) return '';
-  return `${baseUrl}/Free-${Countries[country]}-Phone-Number/`;
+  const countryMap = {
+    'USA': 'USA',
+    'UK': 'UK',
+    'Finland': 'Finland',
+    'Sweden': 'Sweden',
+    'Netherlands': 'Netherlands',
+    'Belgium': 'Belgium',
+    'Slovenia': 'Slovenia'
+  };
+  return `${baseUrl}/Free-${countryMap[country]}-Phone-Number/`;
 }
 
 function getPhoneNumberUrl(country, phone) {
-  const withCountryCode = country === 'USA' && !phone.startsWith('+') && !phone.startsWith('1') 
-    ? `1${phone}` 
-    : phone;
-  return `${getCountryUrl(country)}${withCountryCode.replace('+', '')}/`;
+  const cleanPhone = phone.replace(/[^0-9]/g, '');
+  const withCountryCode = country === 'USA' && !cleanPhone.startsWith('1') 
+    ? `1${cleanPhone}` 
+    : cleanPhone;
+  return `${getCountryUrl(country)}${withCountryCode}/`;
 }
 
 // ============ BROWSER MANAGEMENT ============
@@ -89,8 +99,6 @@ async function getBrowser() {
           '--disable-dev-shm-usage',
           '--disable-accelerated-2d-canvas',
           '--disable-gpu',
-          '--disable-web-security',
-          '--disable-features=IsolateOrigins,site-per-process',
           '--no-first-run',
           '--no-zygote',
           '--disable-extensions',
@@ -98,11 +106,7 @@ async function getBrowser() {
           '--disable-default-apps',
           '--disable-sync',
           '--disable-translate',
-          '--hide-scrollbars',
-          '--metrics-recording-only',
-          '--mute-audio',
-          '--no-default-browser-check',
-          '--no-pings'
+          '--hide-scrollbars'
         ],
         timeout: 30000,
         ...(isRailway && {
@@ -135,11 +139,13 @@ async function numberIsOnline(page, country, phoneNumber) {
       timeout: 15000 
     });
     
-    // Check if we got a valid page
-    const title = await page.title();
-    consola.info(`Page title: ${title}`);
+    // Check if page loaded and has messages
+    const hasMessages = await page.evaluate(() => {
+      const smsItems = document.querySelectorAll('.sms-item');
+      return smsItems.length > 0;
+    });
     
-    return !!result && !title.includes('404') && !title.includes('Not Found');
+    return !!result && hasMessages;
   } catch (error) {
     consola.warn('Failed to check number online:', error.message);
     return false;
@@ -150,67 +156,38 @@ async function parseMessages(page) {
   try {
     const currentUrl = page.url();
     
-    // Try different selectors for messages
-    const selectors = [
-      '.casetext > .row',
-      '.message-item',
-      '.sms-item',
-      '.message-row',
-      '.row.message'
-    ];
-    
-    let messageRows = [];
-    let foundSelector = null;
-    
-    for (const selector of selectors) {
-      try {
-        await page.waitForSelector(selector, { timeout: 2000 });
-        messageRows = await page.$$eval(selector, (rows) =>
-          rows.map((row) => ({
-            ago: row.querySelector('.time, .ago, .date')?.textContent || row.children[1]?.textContent || '',
-            message: row.querySelector('.text, .content, .message')?.textContent || row.children[2]?.textContent || ''
-          }))
-        );
-        if (messageRows.length > 0) {
-          foundSelector = selector;
-          break;
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-
-    if (!messageRows.length) {
-      // Fallback: get all text content
-      const pageText = await page.evaluate(() => document.body.innerText);
-      consola.info('Page text sample:', pageText.substring(0, 200));
+    // Parse SMS messages from the page
+    const messages = await page.evaluate(() => {
+      const results = [];
+      const items = document.querySelectorAll('.sms-item');
       
-      // Try to find SMS patterns
-      const lines = pageText.split('\n').filter(line => line.trim());
-      for (const line of lines) {
-        if (line.match(/\d{4,6}/) || line.match(/[A-Z]{2,}/)) {
-          messageRows.push({
-            ago: 'now',
-            message: line.trim()
+      items.forEach(item => {
+        const senderEl = item.querySelector('.sender-badge');
+        const timeEl = item.querySelector('.time-text');
+        const contentEl = item.querySelector('.sms-content');
+        
+        if (contentEl) {
+          results.push({
+            sender: senderEl ? senderEl.textContent?.trim() || '' : '',
+            time: timeEl ? timeEl.textContent?.trim() || '' : '',
+            message: contentEl.textContent?.trim() || ''
           });
         }
-      }
-    }
-
-    const parsedMessages = messageRows
-      .filter((row) => row.ago.length || row.message.length)
-      .map((row) => {
-        const agoParsed = parseTimeAgo(row.ago);
-        return {
-          ago: agoParsed || Date.now(),
-          agoText: row.ago || 'now',
-          message: row.message,
-          url: currentUrl
-        };
       });
+      
+      return results;
+    });
 
-    consola.info(`Found ${parsedMessages.length} messages on page`);
-    return parsedMessages;
+    consola.info(`Found ${messages.length} messages on page`);
+
+    return messages.map((msg) => ({
+      ago: parseTimeAgo(msg.time) || Date.now(),
+      agoText: msg.time || 'now',
+      message: msg.message,
+      sender: msg.sender,
+      url: currentUrl,
+      otp: tryParseOtpCode(msg.message)
+    }));
   } catch (error) {
     consola.warn('Error parsing messages:', error.message);
     return [];
@@ -246,10 +223,7 @@ async function recursivelyCheckMessages(page, askedAt, matcher, recheckDelay, at
 
     if (matches.length) {
       consola.success(`Found ${matches.length} matching messages!`);
-      return matches.map((match) => ({
-        ...match,
-        otp: tryParseOtpCode(match.message)
-      }));
+      return matches;
     }
 
     consola.info(
@@ -286,120 +260,63 @@ async function handleReceiveSmsFreeCC(page, options) {
   return match;
 }
 
-async function elementExist(page, locator) {
-  return (await page.$(locator).catch(() => null)) !== null;
-}
-
 async function parseNumbersPage(page, country, url) {
   try {
     consola.info(`Navigating to: ${url}`);
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
     
-    // Wait for content to load with multiple selector attempts
-    const selectors = [
-      '.section04 .index-title',
-      '.index-title',
-      '.section04',
-      '.layout .index-case',
-      '.layout',
-      'h2',
-      'li a[href]'
-    ];
-    
-    let contentLoaded = false;
-    for (const selector of selectors) {
-      try {
-        await page.waitForSelector(selector, { timeout: 3000 });
-        contentLoaded = true;
-        consola.success(`Found selector: ${selector}`);
-        break;
-      } catch (e) {
-        continue;
-      }
-    }
-    
-    if (!contentLoaded) {
-      consola.warn('Could not find expected selectors, trying to extract any links...');
-    }
-    
+    // Wait for content to load
+    await page.waitForSelector('#numbersGrid', { timeout: 10000 }).catch(() => {});
     await delay(2);
 
-    // Try multiple selectors for phone numbers
-    const phoneSelectors = [
-      'li a[href] > h2 > span',
-      'li a[href] > h2',
-      'a[href*="Free-"] > h2',
-      '.phone-number',
-      '.number'
-    ];
-    
-    let numbers = [];
-    for (const selector of phoneSelectors) {
-      try {
-        const elements = await page.$$eval(selector, (elements) =>
-          elements.map((el) => el?.textContent?.trim() || '')
-        );
-        if (elements.length > 0) {
-          numbers = elements.filter(phone => phone && phone.length > 3);
-          consola.success(`Found ${numbers.length} numbers using selector: ${selector}`);
-          break;
+    // Extract phone numbers from the page
+    const numbers = await page.evaluate(() => {
+      const results = [];
+      const cards = document.querySelectorAll('.number-card');
+      
+      cards.forEach(card => {
+        const link = card.closest('a');
+        if (link) {
+          const href = link.href;
+          // Extract phone number from href
+          const match = href.match(/\/(\d+)\/$/);
+          if (match) {
+            results.push(match[1]);
+          }
         }
-      } catch (e) {
-        continue;
-      }
-    }
+      });
+      
+      return results;
+    });
 
-    // If no numbers found, try to extract from all links
-    if (!numbers.length) {
-      consola.info('Trying to extract numbers from links...');
-      numbers = await page.$$eval('a[href]', (links) =>
-        links
-          .map(link => link.textContent?.trim())
-          .filter(text => text && text.match(/[\d\s\-+()]{7,}/))
-          .map(text => text.replace(/[^0-9+]/g, ''))
-      );
-    }
-
-    const cleanedNumbers = numbers
-      .filter(phone => Boolean(phone) && phone.length > 3)
-      .map(phone => phone.replace('+1', '').replaceAll(' ', '').replaceAll('-', '').replaceAll('(', '').replaceAll(')', ''))
-      .filter(phone => phone.length > 4);
-
-    consola.success(`Parsed ${cleanedNumbers.length} phone numbers`);
+    consola.success(`Parsed ${numbers.length} phone numbers`);
 
     // Check for pagination
-    const paginationSelectors = [
-      '.pagination > li.active + li a',
-      '.pagination li.active ~ li a',
-      '.next a',
-      'a[rel="next"]'
-    ];
-    
     let nextPageUrl = null;
-    for (const selector of paginationSelectors) {
-      try {
-        const nextHref = await page.$eval(selector, (el) => el?.href);
-        if (nextHref && nextHref !== url) {
-          nextPageUrl = nextHref;
-          consola.success(`Found next page: ${nextPageUrl}`);
-          break;
+    try {
+      const paginationLinks = await page.$$eval('.pagination a', (links) => {
+        for (const link of links) {
+          if (link.textContent?.includes('»') || link.textContent?.includes('Next')) {
+            return link.href;
+          }
         }
-      } catch (e) {
-        continue;
+        return null;
+      });
+      
+      if (paginationLinks && paginationLinks !== url) {
+        nextPageUrl = paginationLinks;
+        consola.success(`Found next page: ${nextPageUrl}`);
       }
+    } catch (e) {
+      consola.info('No pagination found');
     }
 
     return {
-      numbers: cleanedNumbers,
+      numbers: numbers,
       nextPageUrl
     };
   } catch (error) {
     consola.error('Error parsing numbers page:', error.message);
-    // Try to get page content for debugging
-    try {
-      const content = await page.content();
-      consola.debug('Page content length:', content.length);
-    } catch (e) {}
     return { numbers: [] };
   }
 }
@@ -429,7 +346,7 @@ async function getReceiveSmsFreePhones(page, country, nextUrl) {
 // ============ EXPRESS APP ============
 const app = express();
 
-// Rate limiting to prevent abuse
+// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -494,9 +411,36 @@ app.get('/api/numbers/:country', async (req, res) => {
     consola.error('Error fetching numbers:', error);
     res.status(500).json({ 
       error: 'Failed to fetch phone numbers',
-      message: error instanceof Error ? error.message : 'Unknown error',
-      details: error.stack
+      message: error instanceof Error ? error.message : 'Unknown error'
     });
+  }
+});
+
+// Get messages for a specific phone number
+app.get('/api/messages/:country/:phone', async (req, res) => {
+  try {
+    const { country, phone } = req.params;
+    
+    const browserInstance = await getBrowser();
+    const pageInstance = await browserInstance.newPage();
+    
+    try {
+      const url = getPhoneNumberUrl(country, phone);
+      await pageInstance.goto(url, { waitUntil: 'networkidle2', timeout: 15000 });
+      
+      const messages = await parseMessages(pageInstance);
+      
+      res.json({
+        success: true,
+        country,
+        phone,
+        messages
+      });
+    } finally {
+      await pageInstance.close().catch(() => {});
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -522,7 +466,6 @@ app.post('/api/wait-for-otp', async (req, res) => {
     const pageInstance = await browserInstance.newPage();
     
     try {
-      // Set timeout for the entire operation
       const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => reject(new Error('Timeout waiting for OTP')), timeout);
       });
@@ -553,7 +496,7 @@ app.post('/api/wait-for-otp', async (req, res) => {
   }
 });
 
-// Get specific phone number URL
+// Get phone number URL
 app.get('/api/phone-url/:country/:phone', (req, res) => {
   try {
     const { country, phone } = req.params;
@@ -577,6 +520,49 @@ app.get('/api/phone-url/:country/:phone', (req, res) => {
   }
 });
 
+// Debug endpoint
+app.get('/api/debug/:country', async (req, res) => {
+  try {
+    const { country } = req.params;
+    const browserInstance = await getBrowser();
+    const pageInstance = await browserInstance.newPage();
+    
+    try {
+      const url = getCountryUrl(country);
+      await pageInstance.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
+      
+      const debug = await pageInstance.evaluate(() => {
+        const numbers = [];
+        const cards = document.querySelectorAll('.number-card');
+        cards.forEach(card => {
+          const link = card.closest('a');
+          if (link) {
+            numbers.push(link.href);
+          }
+        });
+        
+        return {
+          title: document.title,
+          url: window.location.href,
+          numberCardsFound: cards.length,
+          numbers: numbers.slice(0, 10),
+          pageText: document.body.innerText.substring(0, 500)
+        };
+      });
+      
+      res.json({
+        success: true,
+        url,
+        debug
+      });
+    } finally {
+      await pageInstance.close().catch(() => {});
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Cleanup endpoint
 app.post('/api/cleanup', async (req, res) => {
   try {
@@ -594,7 +580,12 @@ app.post('/api/cleanup', async (req, res) => {
 const server = app.listen(PORT, '0.0.0.0', () => {
   consola.success(`🚀 Server running on port ${PORT}`);
   consola.info(`📍 Health check: http://localhost:${PORT}/health`);
-  consola.info(`📱 API endpoints available at /api/`);
+  consola.info(`📱 API endpoints:`);
+  consola.info(`   GET  /api/countries`);
+  consola.info(`   GET  /api/numbers/:country`);
+  consola.info(`   GET  /api/messages/:country/:phone`);
+  consola.info(`   POST /api/wait-for-otp`);
+  consola.info(`   GET  /api/debug/:country`);
   consola.info(`🔧 Running on: ${process.env.RAILWAY ? 'Railway' : 'Local'}`);
 });
 
