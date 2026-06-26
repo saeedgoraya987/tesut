@@ -1,13 +1,21 @@
 import express from 'express';
 import cors from 'cors';
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { consola } from 'consola';
 import rateLimit from 'express-rate-limit';
+
+// Use stealth plugin to bypass Cloudflare
+puppeteer.use(StealthPlugin());
 
 // ============ CONFIGURATION ============
 const PORT = process.env.PORT || 3000;
 const baseUrl = 'https://receive-sms-free.cc';
 const defaultRecheckDelay = 5; // seconds
+
+// Enable trust proxy for Railway
+const app = express();
+app.set('trust proxy', true);
 
 // ============ COUNTRY DATA ============
 const Countries = {
@@ -87,7 +95,7 @@ let isShuttingDown = false;
 
 async function getBrowser() {
   if (!browser) {
-    consola.info('Launching browser...');
+    consola.info('Launching browser with stealth...');
     try {
       const isRailway = !!process.env.RAILWAY_SERVICE_ID || !!process.env.RAILWAY;
       
@@ -106,7 +114,33 @@ async function getBrowser() {
           '--disable-default-apps',
           '--disable-sync',
           '--disable-translate',
-          '--hide-scrollbars'
+          '--hide-scrollbars',
+          '--disable-web-security',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-blink-features=AutomationControlled',
+          '--disable-dev-shm-usage',
+          '--disable-ipc-flooding-protection',
+          '--disable-renderer-backgrounding',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-breakpad',
+          '--disable-component-extensions-with-background-pages',
+          '--disable-domain-reliability',
+          '--disable-google-remoting',
+          '--disable-hang-monitor',
+          '--disable-ipc-flooding-protection',
+          '--disable-prompt-on-repost',
+          '--disable-renderer-backgrounding',
+          '--disable-setuid-sandbox',
+          '--disable-speech-api',
+          '--disable-sync',
+          '--disable-wake-on-wifi',
+          '--enable-features=NetworkService,NetworkServiceInProcess',
+          '--force-color-profile=srgb',
+          '--metrics-recording-only',
+          '--mute-audio',
+          '--no-default-browser-check',
+          '--no-pings'
         ],
         timeout: 30000,
         ...(isRailway && {
@@ -119,7 +153,7 @@ async function getBrowser() {
         browser = null;
       });
       
-      consola.success('Browser launched successfully');
+      consola.success('Browser launched successfully with stealth');
       
     } catch (error) {
       consola.error('Failed to launch browser:', error.message);
@@ -130,22 +164,56 @@ async function getBrowser() {
 }
 
 // ============ CORE FUNCTIONS ============
+async function waitForCloudflare(page, timeout = 30000) {
+  const startTime = Date.now();
+  
+  while (Date.now() - startTime < timeout) {
+    const title = await page.title().catch(() => '');
+    
+    if (title.includes('Attention Required') || title.includes('Cloudflare')) {
+      consola.info('Cloudflare detected, waiting...');
+      await delay(3);
+      continue;
+    }
+    
+    // Check if we're on the actual site
+    const url = page.url();
+    if (url.includes('receive-sms-free.cc') && !url.includes('challenge')) {
+      consola.success('Bypassed Cloudflare');
+      return true;
+    }
+    
+    await delay(1);
+  }
+  
+  return false;
+}
+
 async function numberIsOnline(page, country, phoneNumber) {
   const url = getPhoneNumberUrl(country, phoneNumber);
   try {
     consola.info(`Checking URL: ${url}`);
-    const result = await page.goto(url, { 
+    await page.goto(url, { 
       waitUntil: 'networkidle2', 
-      timeout: 15000 
+      timeout: 30000
     });
     
-    // Check if page loaded and has messages
-    const hasMessages = await page.evaluate(() => {
-      const smsItems = document.querySelectorAll('.sms-item');
-      return smsItems.length > 0;
+    // Wait for Cloudflare
+    const passed = await waitForCloudflare(page);
+    if (!passed) {
+      consola.warn('Could not bypass Cloudflare');
+      return false;
+    }
+    
+    await delay(2);
+    
+    // Check if page loaded properly
+    const hasContent = await page.evaluate(() => {
+      const smsItems = document.querySelectorAll('.sms-item, .casetext, .row');
+      return smsItems.length > 0 || document.body.innerText.length > 1000;
     });
     
-    return !!result && hasMessages;
+    return hasContent;
   } catch (error) {
     consola.warn('Failed to check number online:', error.message);
     return false;
@@ -156,24 +224,53 @@ async function parseMessages(page) {
   try {
     const currentUrl = page.url();
     
+    // Wait for content to load
+    await page.waitForSelector('.sms-item, .casetext > .row, .sms-content', { timeout: 10000 }).catch(() => {});
+    await delay(1);
+    
     // Parse SMS messages from the page
     const messages = await page.evaluate(() => {
       const results = [];
-      const items = document.querySelectorAll('.sms-item');
+      
+      // Try different selectors
+      const items = document.querySelectorAll('.sms-item, .casetext > .row, .message-item');
       
       items.forEach(item => {
-        const senderEl = item.querySelector('.sender-badge');
-        const timeEl = item.querySelector('.time-text');
-        const contentEl = item.querySelector('.sms-content');
+        const senderEl = item.querySelector('.sender-badge, .from, .sender');
+        const timeEl = item.querySelector('.time-text, .ago, .date, .time');
+        const contentEl = item.querySelector('.sms-content, .message, .text, .content, .casetext');
         
+        let message = '';
         if (contentEl) {
+          message = contentEl.textContent?.trim() || '';
+        } else {
+          // Fallback: get all text
+          message = item.textContent?.trim() || '';
+        }
+        
+        if (message.length > 0) {
           results.push({
             sender: senderEl ? senderEl.textContent?.trim() || '' : '',
             time: timeEl ? timeEl.textContent?.trim() || '' : '',
-            message: contentEl.textContent?.trim() || ''
+            message: message
           });
         }
       });
+      
+      // If no messages found with selectors, try to get all text
+      if (results.length === 0) {
+        const allText = document.body.innerText;
+        const lines = allText.split('\n').filter(line => line.trim().length > 10);
+        for (const line of lines) {
+          if (line.match(/\d{4,6}/) || line.match(/verification|code|otp/i)) {
+            results.push({
+              sender: 'Unknown',
+              time: 'now',
+              message: line.trim()
+            });
+          }
+        }
+      }
       
       return results;
     });
@@ -200,7 +297,8 @@ async function recursivelyCheckMessages(page, askedAt, matcher, recheckDelay, at
     await delay(2);
     
     // Refresh the page to get new messages
-    await page.reload({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    await page.reload({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+    await waitForCloudflare(page);
     await delay(1);
 
     const parsed = (await parseMessages(page)) || [];
@@ -263,28 +361,47 @@ async function handleReceiveSmsFreeCC(page, options) {
 async function parseNumbersPage(page, country, url) {
   try {
     consola.info(`Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    
+    // Wait for Cloudflare
+    const passed = await waitForCloudflare(page);
+    if (!passed) {
+      consola.warn('Could not bypass Cloudflare');
+      return { numbers: [] };
+    }
     
     // Wait for content to load
-    await page.waitForSelector('#numbersGrid', { timeout: 10000 }).catch(() => {});
+    await page.waitForSelector('#numbersGrid, .number-card, .col-12', { timeout: 15000 }).catch(() => {});
     await delay(2);
 
     // Extract phone numbers from the page
     const numbers = await page.evaluate(() => {
       const results = [];
-      const cards = document.querySelectorAll('.number-card');
       
-      cards.forEach(card => {
-        const link = card.closest('a');
-        if (link) {
-          const href = link.href;
-          // Extract phone number from href
-          const match = href.match(/\/(\d+)\/$/);
-          if (match) {
-            results.push(match[1]);
-          }
+      // Try to find numbers in links
+      const links = document.querySelectorAll('a[href*="Phone-Number/"]');
+      links.forEach(link => {
+        const href = link.href;
+        // Extract phone number from href
+        const match = href.match(/\/(\d{10,15})\/?$/);
+        if (match && !results.includes(match[1])) {
+          results.push(match[1]);
         }
       });
+      
+      // If no numbers found in links, try to find in text
+      if (results.length === 0) {
+        const text = document.body.innerText;
+        const phoneMatches = text.match(/\+\d{1,3}\s*[\d\s-]{7,15}/g);
+        if (phoneMatches) {
+          phoneMatches.forEach(phone => {
+            const clean = phone.replace(/[^0-9]/g, '');
+            if (clean.length >= 10 && !results.includes(clean)) {
+              results.push(clean);
+            }
+          });
+        }
+      }
       
       return results;
     });
@@ -296,7 +413,8 @@ async function parseNumbersPage(page, country, url) {
     try {
       const paginationLinks = await page.$$eval('.pagination a', (links) => {
         for (const link of links) {
-          if (link.textContent?.includes('»') || link.textContent?.includes('Next')) {
+          const text = link.textContent?.trim() || '';
+          if (text.includes('»') || text.includes('Next') || text.includes('→')) {
             return link.href;
           }
         }
@@ -344,13 +462,17 @@ async function getReceiveSmsFreePhones(page, country, nextUrl) {
 }
 
 // ============ EXPRESS APP ============
-const app = express();
 
-// Rate limiting
+// Rate limiting with trust proxy fix
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
-  skip: (req) => req.path === '/health'
+  skip: (req) => req.path === '/health',
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    return req.ip || req.connection.remoteAddress || 'unknown';
+  }
 });
 
 app.use(cors());
@@ -426,7 +548,8 @@ app.get('/api/messages/:country/:phone', async (req, res) => {
     
     try {
       const url = getPhoneNumberUrl(country, phone);
-      await pageInstance.goto(url, { waitUntil: 'networkidle2', timeout: 15000 });
+      await pageInstance.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+      await waitForCloudflare(pageInstance);
       
       const messages = await parseMessages(pageInstance);
       
@@ -529,24 +652,28 @@ app.get('/api/debug/:country', async (req, res) => {
     
     try {
       const url = getCountryUrl(country);
-      await pageInstance.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
+      await pageInstance.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+      await waitForCloudflare(pageInstance);
       
       const debug = await pageInstance.evaluate(() => {
         const numbers = [];
-        const cards = document.querySelectorAll('.number-card');
-        cards.forEach(card => {
-          const link = card.closest('a');
-          if (link) {
-            numbers.push(link.href);
+        const links = document.querySelectorAll('a[href*="Phone-Number/"]');
+        links.forEach(link => {
+          const href = link.href;
+          const match = href.match(/\/(\d{10,15})\/?$/);
+          if (match) {
+            numbers.push(match[1]);
           }
         });
         
         return {
           title: document.title,
           url: window.location.href,
-          numberCardsFound: cards.length,
-          numbers: numbers.slice(0, 10),
-          pageText: document.body.innerText.substring(0, 500)
+          linksFound: links.length,
+          numbers: numbers.slice(0, 20),
+          pageText: document.body.innerText.substring(0, 1000),
+          hasNumbersGrid: !!document.querySelector('#numbersGrid'),
+          hasNumberCards: !!document.querySelector('.number-card')
         };
       });
       
