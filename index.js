@@ -127,7 +127,7 @@ async function getBrowser() {
   return browser;
 }
 
-// ============ AUTHENTICATION ============
+// ============ AUTHENTICATION WITH BETTER TURNSTILE ============
 async function authenticate(page) {
   if (authCookies && authSession) {
     consola.info('Using existing session');
@@ -136,16 +136,21 @@ async function authenticate(page) {
 
   if (!IVAS_EMAIL || !IVAS_PASSWORD) {
     consola.error('IVAS_EMAIL and IVAS_PASSWORD environment variables must be set');
-    throw new Error('Missing credentials. Set IVAS_EMAIL and IVAS_PASSWORD environment variables.');
+    throw new Error('Missing credentials.');
   }
 
   consola.info('Authenticating to iVAS...');
   
   try {
+    // Navigate to login page
+    consola.info('Navigating to login page...');
     await page.goto(`${baseUrl}/login`, {
       waitUntil: 'networkidle2',
       timeout: 30000
     });
+
+    // Wait a moment for page to stabilize
+    await delay(2);
 
     // Get CSRF token
     const token = await page.evaluate(() => {
@@ -155,33 +160,82 @@ async function authenticate(page) {
     consola.info(`CSRF Token: ${token || 'Not found'}`);
 
     // Fill in login form
-    await page.type('#card-email', IVAS_EMAIL);
-    await page.type('#card-password', IVAS_PASSWORD);
+    consola.info('Filling login form...');
+    await page.type('#card-email', IVAS_EMAIL, { delay: 50 });
+    await page.type('#card-password', IVAS_PASSWORD, { delay: 50 });
 
     // Check "Remember me"
-    await page.click('#card-checkbox').catch(() => {});
+    try {
+      await page.click('#card-checkbox');
+      consola.info('Checked "Remember me"');
+    } catch (e) {
+      consola.warn('Could not check "Remember me"');
+    }
 
-    // Wait for Cloudflare Turnstile to complete
-    consola.info('Waiting for Cloudflare Turnstile...');
-    await page.waitForSelector('.cf-turnstile', { timeout: 15000 }).catch(() => {});
-    await delay(5);
+    // Handle Cloudflare Turnstile
+    consola.info('Handling Cloudflare Turnstile...');
+    
+    // Wait for Turnstile iframe to load
+    await page.waitForSelector('.cf-turnstile', { timeout: 15000 }).catch(() => {
+      consola.warn('Turnstile not found, proceeding anyway...');
+    });
+
+    // Wait for Turnstile to complete (it auto-solves)
+    consola.info('Waiting for Turnstile to auto-solve...');
+    await delay(8); // Give Turnstile time to solve
+
+    // Check if Turnstile is solved
+    const turnstileSolved = await page.evaluate(() => {
+      const turnstileWidget = document.querySelector('.cf-turnstile iframe');
+      if (!turnstileWidget) return false;
+      
+      // Check for success indicator
+      const turnstileInput = document.querySelector('[name="cf-turnstile-response"]');
+      if (turnstileInput && turnstileInput.value && turnstileInput.value.length > 0) {
+        return true;
+      }
+      return false;
+    });
+
+    consola.info(`Turnstile solved: ${turnstileSolved}`);
 
     // Submit the form
     consola.info('Submitting login form...');
-    await page.evaluate(() => {
-      const form = document.querySelector('form');
-      if (form) form.submit();
-    });
+    
+    // Try multiple submit methods
+    try {
+      // Method 1: Click submit button
+      const submitBtn = await page.$('button[type="submit"]');
+      if (submitBtn) {
+        await submitBtn.click();
+      } else {
+        // Method 2: JavaScript submit
+        await page.evaluate(() => {
+          const form = document.querySelector('form');
+          if (form) form.submit();
+        });
+      }
+    } catch (e) {
+      consola.warn('Submit failed, trying alternative...');
+      await page.evaluate(() => {
+        const form = document.querySelector('form');
+        if (form) form.submit();
+      });
+    }
 
-    // Wait for navigation to portal
+    // Wait for navigation
+    consola.info('Waiting for navigation...');
     await page.waitForNavigation({
       waitUntil: 'networkidle2',
       timeout: 30000
-    }).catch(() => {});
+    }).catch((e) => {
+      consola.warn('Navigation timeout:', e.message);
+    });
 
     const currentUrl = page.url();
     consola.info(`Current URL after login: ${currentUrl}`);
     
+    // Check if login was successful
     if (currentUrl.includes('/portal') || currentUrl.includes('/dashboard')) {
       consola.success('Authentication successful!');
       
@@ -193,9 +247,20 @@ async function authenticate(page) {
       
       return true;
     } else {
+      // Check for error message
       const errorMessage = await page.evaluate(() => {
-        const errorEl = document.querySelector('.alert-danger, .alert-error, .invalid-feedback, .text-danger');
-        return errorEl ? errorEl.textContent?.trim() : null;
+        const selectors = [
+          '.alert-danger', 
+          '.alert-error', 
+          '.invalid-feedback', 
+          '.text-danger',
+          '.alert'
+        ];
+        for (const selector of selectors) {
+          const el = document.querySelector(selector);
+          if (el) return el.textContent?.trim();
+        }
+        return null;
       });
       
       consola.error('Authentication failed:', errorMessage || 'Unknown error');
@@ -209,7 +274,10 @@ async function authenticate(page) {
 
 // ============ PORTAL / DASHBOARD ============
 async function getPortalData(page) {
-  await authenticate(page);
+  const authSuccess = await authenticate(page);
+  if (!authSuccess) {
+    throw new Error('Authentication failed');
+  }
   
   consola.info('Fetching portal data...');
   await page.goto(`${baseUrl}/portal`, {
@@ -324,7 +392,10 @@ async function getPortalData(page) {
 
 // ============ NUMBERS ============
 async function getNumbers(page) {
-  await authenticate(page);
+  const authSuccess = await authenticate(page);
+  if (!authSuccess) {
+    throw new Error('Authentication failed');
+  }
   
   consola.info('Fetching numbers...');
   await page.goto(`${baseUrl}/portal/numbers`, {
@@ -362,11 +433,13 @@ async function getNumbers(page) {
 
 // ============ MESSAGES ============
 async function getMessages(page, number) {
-  await authenticate(page);
+  const authSuccess = await authenticate(page);
+  if (!authSuccess) {
+    throw new Error('Authentication failed');
+  }
   
   consola.info(`Fetching messages for ${number}...`);
   
-  // Try to find messages - could be in different sections
   await page.goto(`${baseUrl}/portal/sms/test/sms`, {
     waitUntil: 'networkidle2',
     timeout: 30000
@@ -387,7 +460,6 @@ async function getMessages(page, number) {
         const message = messageEl ? messageEl.textContent?.trim() : '';
         const time = timeEl ? timeEl.textContent?.trim() : '';
         
-        // If searching for specific number, filter
         if (!searchNumber || numberText.includes(searchNumber)) {
           if (message) {
             const otpMatch = message.match(/\b\d{4,6}\b/);
@@ -485,6 +557,7 @@ app.get('/api/portal', async (req, res) => {
   } catch (error) {
     consola.error('Error fetching portal:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to fetch portal data',
       message: error.message
     });
@@ -509,6 +582,7 @@ app.get('/api/numbers', async (req, res) => {
   } catch (error) {
     consola.error('Error fetching numbers:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to fetch numbers',
       message: error.message
     });
@@ -536,6 +610,7 @@ app.get('/api/messages/:number', async (req, res) => {
   } catch (error) {
     consola.error('Error fetching messages:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to fetch messages',
       message: error.message
     });
@@ -560,6 +635,7 @@ app.get('/api/live-sms', async (req, res) => {
   } catch (error) {
     consola.error('Error fetching live SMS:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to fetch live SMS',
       message: error.message
     });
@@ -584,13 +660,14 @@ app.get('/api/top-apps', async (req, res) => {
   } catch (error) {
     consola.error('Error fetching top apps:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to fetch top applications',
       message: error.message
     });
   }
 });
 
-// Login endpoint
+// Test login endpoint
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -600,38 +677,42 @@ app.post('/api/login', async (req, res) => {
     
     if (!useEmail || !usePassword) {
       return res.status(400).json({
-        error: 'Email and password required. Set IVAS_EMAIL and IVAS_PASSWORD env vars or provide in request.'
+        success: false,
+        error: 'Email and password required'
       });
     }
+    
+    consola.info(`Login attempt for: ${useEmail}`);
     
     const browserInstance = await getBrowser();
     const page = await browserInstance.newPage();
     
     try {
-      const originalEmail = IVAS_EMAIL;
-      const originalPassword = IVAS_PASSWORD;
-      
-      process.env.IVAS_EMAIL = useEmail;
-      process.env.IVAS_PASSWORD = usePassword;
-      
-      authCookies = null;
-      authSession = null;
+      // Set viewport for better compatibility
+      await page.setViewport({ width: 1280, height: 800 });
       
       const success = await authenticate(page);
       
-      process.env.IVAS_EMAIL = originalEmail;
-      process.env.IVAS_PASSWORD = originalPassword;
-      
       if (success) {
-        res.json({
-          success: true,
-          message: 'Login successful',
-          redirect: '/portal'
-        });
+        // Try to get portal data
+        try {
+          const data = await getPortalData(page);
+          res.json({
+            success: true,
+            message: 'Login successful',
+            data: data
+          });
+        } catch (e) {
+          res.json({
+            success: true,
+            message: 'Login successful but could not fetch data',
+            error: e.message
+          });
+        }
       } else {
         res.status(401).json({
           success: false,
-          error: 'Login failed. Please check your credentials.'
+          error: 'Login failed. Please check your credentials or try again.'
         });
       }
     } finally {
@@ -640,6 +721,7 @@ app.post('/api/login', async (req, res) => {
   } catch (error) {
     consola.error('Login error:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Login failed',
       message: error.message
     });
@@ -664,7 +746,10 @@ app.post('/api/logout', async (req, res) => {
       message: 'Logged out successfully'
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
   }
 });
 
@@ -689,7 +774,10 @@ app.post('/api/cleanup', async (req, res) => {
     }
     res.json({ success: true, message: 'Browser closed' });
   } catch (error) {
-    res.status(500).json({ error: 'Cleanup failed' });
+    res.status(500).json({ 
+      success: false,
+      error: 'Cleanup failed' 
+    });
   }
 });
 
@@ -707,8 +795,8 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   consola.info(`   POST /api/logout - Logout`);
   consola.info(`   GET  /api/status - Check login status`);
   consola.info(`🔧 Running on: ${process.env.RAILWAY ? 'Railway' : 'Local'}`);
-  consola.info(`📧 Email: ${IVAS_EMAIL ? 'Set' : 'NOT SET - Please set IVAS_EMAIL'}`);
-  consola.info(`🔑 Password: ${IVAS_PASSWORD ? 'Set' : 'NOT SET - Please set IVAS_PASSWORD'}`);
+  consola.info(`📧 Email: ${IVAS_EMAIL ? 'Set' : 'NOT SET'}`);
+  consola.info(`🔑 Password: ${IVAS_PASSWORD ? 'Set' : 'NOT SET'}`);
 });
 
 // ============ GRACEFUL SHUTDOWN ============
