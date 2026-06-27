@@ -10,6 +10,10 @@
     "restartPolicyMaxRetries": 10,
     "startCommand": "node index.js",
     "healthcheckPath": "/health",
-    "healthcheckTimeout": 100
+    "healthcheckTimeout": 100,
+    "restart": {
+      "policy": "on-failure",
+      "maxRetries": 3
+    }
   }
 }
