@@ -17,18 +17,117 @@ const defaultRecheckDelay = 5; // seconds
 const app = express();
 app.set('trust proxy', true);
 
-// ============ COUNTRY DATA ============
-const Countries = {
-  Finland: 'Finland',
-  Sweden: 'Sweden',
-  Netherlands: 'Netherlands',
-  UK: 'UK',
-  USA: 'USA',
-  Belgium: 'Belgium',
-  Slovenia: 'Slovenia'
+// ============ COUNTRY MAP ============
+const countryNameMap = {
+  'United States': 'USA',
+  'USA': 'USA',
+  'United Kingdom': 'UK',
+  'UK': 'UK',
+  'Finland': 'Finland',
+  'Sweden': 'Sweden',
+  'Netherlands': 'Netherlands',
+  'Belgium': 'Belgium',
+  'Slovenia': 'Slovenia',
+  'Poland': 'Poland',
+  'Canada': 'Canada',
+  'France': 'France',
+  'Germany': 'Germany',
+  'Austria': 'Austria',
+  'China': 'China',
+  'Philippines': 'Philippines',
+  'Spain': 'Spain',
+  'Romania': 'Romania',
+  'Switzerland': 'Switzerland',
+  'Ukraine': 'Ukraine',
+  'Croatia': 'Croatia',
+  'Mexico': 'Mexico',
+  'Russia': 'Russia',
+  'Portugal': 'Portugal',
+  'HongKong': 'HongKong',
+  'Estonia': 'Estonia',
+  'Myanmar': 'Myanmar',
+  'Italy': 'Italy',
+  'Denmark': 'Denmark',
+  'Latvia': 'Latvia',
+  'Israel': 'Israel',
+  'Kazakhstan': 'Kazakhstan',
+  'India': 'India',
+  'Czech Republic': 'CzechRepublic',
+  'South Africa': 'SouthAfrica',
+  'Macao': 'Macao',
+  'Indonesia': 'Indonesia',
+  'Japan': 'Japan',
+  'Korea': 'Korea',
+  'Serbia': 'Serbia',
+  'Nigeria': 'Nigeria',
+  'Australia': 'Australia',
+  'Malaysia': 'Malaysia',
+  'Norway': 'Norway',
+  'Vietnam': 'Vietnam',
+  'New Zealand': 'NewZealand',
+  'Thailand': 'Thailand',
+  'Ireland': 'Ireland',
+  'Moldova': 'Moldova',
+  'Morocco': 'Morocco',
+  'Timor Leste': 'TimorLeste'
 };
 
-const countries = Object.keys(Countries);
+// Reverse map for URL formatting
+const urlCountryMap = {
+  'USA': 'USA',
+  'UK': 'UK',
+  'Finland': 'Finland',
+  'Sweden': 'Sweden',
+  'Netherlands': 'Netherlands',
+  'Belgium': 'Belgium',
+  'Slovenia': 'Slovenia',
+  'Poland': 'Poland',
+  'Canada': 'Canada',
+  'France': 'France',
+  'Germany': 'Germany',
+  'Austria': 'Austria',
+  'China': 'China',
+  'Philippines': 'Philippines',
+  'Spain': 'Spain',
+  'Romania': 'Romania',
+  'Switzerland': 'Switzerland',
+  'Ukraine': 'Ukraine',
+  'Croatia': 'Croatia',
+  'Mexico': 'Mexico',
+  'Russia': 'Russia',
+  'Portugal': 'Portugal',
+  'HongKong': 'HongKong',
+  'Estonia': 'Estonia',
+  'Myanmar': 'Myanmar',
+  'Italy': 'Italy',
+  'Denmark': 'Denmark',
+  'Latvia': 'Latvia',
+  'Israel': 'Israel',
+  'Kazakhstan': 'Kazakhstan',
+  'India': 'India',
+  'CzechRepublic': 'CzechRepublic',
+  'SouthAfrica': 'SouthAfrica',
+  'Macao': 'Macao',
+  'Indonesia': 'Indonesia',
+  'Japan': 'Japan',
+  'Korea': 'Korea',
+  'Serbia': 'Serbia',
+  'Nigeria': 'Nigeria',
+  'Australia': 'Australia',
+  'Malaysia': 'Malaysia',
+  'Norway': 'Norway',
+  'Vietnam': 'Vietnam',
+  'NewZealand': 'NewZealand',
+  'Thailand': 'Thailand',
+  'Ireland': 'Ireland',
+  'Moldova': 'Moldova',
+  'Morocco': 'Morocco',
+  'TimorLeste': 'TimorLeste'
+};
+
+let cachedCountries = null;
+let cacheTimestamp = 0;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
 // ============ HELPER FUNCTIONS ============
 function tryParseOtpCode(message) {
@@ -66,19 +165,96 @@ function delay(seconds) {
   return new Promise(resolve => setTimeout(resolve, seconds * 1000));
 }
 
+// ============ COUNTRY FETCHING ============
+async function fetchCountriesWithNumbers(page) {
+  try {
+    consola.info('Fetching countries from /regions/ page...');
+    await page.goto(`${baseUrl}/regions/`, { 
+      waitUntil: 'networkidle2', 
+      timeout: 30000 
+    });
+    
+    // Wait for Cloudflare
+    const passed = await waitForCloudflare(page);
+    if (!passed) {
+      consola.warn('Could not bypass Cloudflare for countries');
+      return [];
+    }
+    
+    await delay(2);
+    
+    // Extract countries with number counts
+    const countriesData = await page.evaluate(() => {
+      const results = [];
+      const cards = document.querySelectorAll('#countryGrid .number-card');
+      
+      cards.forEach(card => {
+        const link = card.closest('a');
+        if (!link) return;
+        
+        const href = link.getAttribute('href');
+        const nameEl = card.querySelector('h3');
+        const countEl = card.querySelector('.text-secondary');
+        
+        if (nameEl && countEl) {
+          const fullName = nameEl.textContent?.trim() || '';
+          // Extract country name (remove "Phone Number" suffix)
+          const name = fullName.replace(/Phone Number$/, '').trim();
+          const countText = countEl.textContent?.trim() || '0 Numbers';
+          const count = parseInt(countText.replace(/[^0-9]/g, '')) || 0;
+          
+          // Extract country code from href
+          const match = href.match(/Free-(.+?)-Phone-Number/);
+          const code = match ? match[1] : '';
+          
+          if (name && count > 0) {
+            results.push({
+              name: name,
+              code: code,
+              count: count,
+              url: href
+            });
+          }
+        }
+      });
+      
+      return results;
+    });
+    
+    consola.success(`Found ${countriesData.length} countries with numbers`);
+    return countriesData;
+  } catch (error) {
+    consola.error('Error fetching countries:', error.message);
+    return [];
+  }
+}
+
+async function getCountriesWithNumbers() {
+  // Check cache
+  const now = Date.now();
+  if (cachedCountries && (now - cacheTimestamp) < CACHE_DURATION) {
+    consola.info('Using cached countries list');
+    return cachedCountries;
+  }
+  
+  const browserInstance = await getBrowser();
+  const page = await browserInstance.newPage();
+  
+  try {
+    const countries = await fetchCountriesWithNumbers(page);
+    cachedCountries = countries;
+    cacheTimestamp = now;
+    return countries;
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 // ============ URL FUNCTIONS ============
 function getCountryUrl(country) {
-  if (!countries.includes(country)) return '';
-  const countryMap = {
-    'USA': 'USA',
-    'UK': 'UK',
-    'Finland': 'Finland',
-    'Sweden': 'Sweden',
-    'Netherlands': 'Netherlands',
-    'Belgium': 'Belgium',
-    'Slovenia': 'Slovenia'
-  };
-  return `${baseUrl}/Free-${countryMap[country]}-Phone-Number/`;
+  const code = urlCountryMap[country];
+  if (!code) return '';
+  return `${baseUrl}/Free-${code}-Phone-Number/`;
 }
 
 function getPhoneNumberUrl(country, phone) {
@@ -492,12 +668,25 @@ app.get('/health', (req, res) => {
 
 // ============ API ENDPOINTS ============
 
-// Get available countries
-app.get('/api/countries', (req, res) => {
-  res.json({ 
-    success: true,
-    countries: ['USA', 'UK', 'Finland', 'Sweden', 'Netherlands', 'Belgium', 'Slovenia']
-  });
+// Get available countries with number counts
+app.get('/api/countries', async (req, res) => {
+  try {
+    const countries = await getCountriesWithNumbers();
+    res.json({ 
+      success: true,
+      countries: countries.map(c => ({
+        name: c.name,
+        code: c.code,
+        count: c.count
+      }))
+    });
+  } catch (error) {
+    consola.error('Error fetching countries:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch countries',
+      message: error.message
+    });
+  }
 });
 
 // Get phone numbers for a country
@@ -506,8 +695,10 @@ app.get('/api/numbers/:country', async (req, res) => {
     const { country } = req.params;
     const { page } = req.query;
     
-    const validCountries = ['USA', 'UK', 'Finland', 'Sweden', 'Netherlands', 'Belgium', 'Slovenia'];
-    if (!country || !validCountries.includes(country)) {
+    // Check if country is valid
+    const countries = await getCountriesWithNumbers();
+    const validCountry = countries.find(c => c.name === country || c.code === country);
+    if (!validCountry) {
       return res.status(400).json({ error: 'Invalid country' });
     }
 
@@ -517,13 +708,13 @@ app.get('/api/numbers/:country', async (req, res) => {
     try {
       const result = await getReceiveSmsFreePhones(
         pageInstance,
-        country,
+        validCountry.code,
         page || undefined
       );
       
       res.json({
         success: true,
-        country,
+        country: validCountry.name,
         ...result
       });
     } finally {
@@ -708,7 +899,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   consola.success(`🚀 Server running on port ${PORT}`);
   consola.info(`📍 Health check: http://localhost:${PORT}/health`);
   consola.info(`📱 API endpoints:`);
-  consola.info(`   GET  /api/countries`);
+  consola.info(`   GET  /api/countries - Dynamic countries with counts`);
   consola.info(`   GET  /api/numbers/:country`);
   consola.info(`   GET  /api/messages/:country/:phone`);
   consola.info(`   POST /api/wait-for-otp`);
