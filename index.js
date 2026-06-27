@@ -6,7 +6,6 @@ import { consola } from 'consola';
 import rateLimit from 'express-rate-limit';
 import axios from 'axios';
 import fs from 'fs';
-import path from 'path';
 
 // Use stealth plugin to bypass Cloudflare
 puppeteer.use(StealthPlugin());
@@ -18,7 +17,7 @@ const baseUrl = 'https://www.ivasms.com';
 // ============ ENVIRONMENT VARIABLES ============
 const IVAS_EMAIL = process.env.IVAS_EMAIL || "saeedgoraya982@gmail.com";
 const IVAS_PASSWORD = process.env.IVAS_PASSWORD || "77913011";
-const TWO_CAPTCHA_API_KEY = process.env.TWO_CAPTCHA_API_KEY || 'd40a0b8b967f22dc7c0cb91a94525d2b';
+const TWO_CAPTCHA_API_KEY = process.env.TWO_CAPTCHA_API_KEY || 'YOUR_2CAPTCHA_API_KEY';
 
 // Enable trust proxy for Railway
 const app = express();
@@ -172,6 +171,49 @@ async function getBrowser() {
     }
   }
   return browser;
+}
+
+// ============ CLOUDFLARE WAIT FUNCTION ============
+async function waitForCloudflareToFinish(page, timeout = 60000) {
+  consola.info('Waiting for Cloudflare challenge to resolve...');
+  
+  const startTime = Date.now();
+  let attempts = 0;
+  
+  while (Date.now() - startTime < timeout) {
+    attempts++;
+    const title = await page.title().catch(() => '');
+    const url = page.url();
+    
+    // Check if we've been redirected to the actual login page
+    if (url.includes('/login') && !title.includes('Just a moment') && !title.includes('Cloudflare')) {
+      consola.success('Cloudflare challenge resolved!');
+      return true;
+    }
+    
+    // Check if we're already past Cloudflare
+    if (url.includes('/portal') || url.includes('/dashboard')) {
+      consola.success('Already past Cloudflare!');
+      return true;
+    }
+    
+    // Check if the page has the actual login form
+    const hasForm = await page.evaluate(() => {
+      return !!document.querySelector('form');
+    }).catch(() => false);
+    
+    if (hasForm && !title.includes('Just a moment')) {
+      consola.success('Login form detected!');
+      return true;
+    }
+    
+    // Wait and try again
+    consola.info(`Still waiting for Cloudflare... (${attempts}s)`);
+    await delay(3); // Wait 3 seconds between checks
+  }
+  
+  consola.error('Cloudflare challenge timed out');
+  return false;
 }
 
 // ============ DEBUG FUNCTION ============
@@ -334,43 +376,31 @@ async function authenticate(page) {
 
     // Navigate to login page
     consola.info('Navigating to login page...');
-    const response = await page.goto(`${baseUrl}/login`, {
+    await page.goto(`${baseUrl}/login`, {
       waitUntil: 'networkidle2',
       timeout: 60000
     });
 
-    consola.info(`Response status: ${response ? response.status() : 'No response'}`);
+    // Wait for Cloudflare challenge to resolve
+    consola.info('Checking for Cloudflare challenge...');
+    const cfResolved = await waitForCloudflareToFinish(page);
     
-    // If 403, try to debug
-    if (response && response.status() === 403) {
-      consola.warn('Received 403 Forbidden - likely Cloudflare blocking');
-      
-      // Try to get page content anyway
-      try {
-        const content = await page.content();
-        consola.info('Page content sample:', content.substring(0, 500));
-      } catch (e) {
-        consola.error('Could not get page content');
-      }
-      
-      // Try with different user agent
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    if (!cfResolved) {
+      consola.warn('Cloudflare challenge did not resolve automatically, trying reload...');
       await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+      await delay(5);
       
-      const newResponse = await page.goto(`${baseUrl}/login`, {
-        waitUntil: 'networkidle2',
-        timeout: 30000
-      });
-      
-      consola.info(`New response status: ${newResponse ? newResponse.status() : 'No response'}`);
+      // Check again after reload
+      const title = await page.title();
+      if (title.includes('Just a moment') || title.includes('Cloudflare')) {
+        consola.error('Cloudflare still blocking after reload');
+        return false;
+      }
     }
-    
-    // Wait for page to load
-    await delay(3);
 
     // Check if we're already logged in
     const currentUrl = page.url();
-    consola.info(`Current URL: ${currentUrl}`);
+    consola.info(`Current URL after Cloudflare: ${currentUrl}`);
     
     if (currentUrl.includes('/portal') || currentUrl.includes('/dashboard')) {
       consola.info('Already logged in!');
@@ -379,10 +409,27 @@ async function authenticate(page) {
       return true;
     }
 
-    // Wait for the page to fully render
-    await page.waitForSelector('form', { timeout: 30000 }).catch(() => {
-      consola.warn('Form not found, continuing...');
+    // Wait for the login form to appear
+    consola.info('Waiting for login form...');
+    await page.waitForSelector('form, #card-email', { 
+      timeout: 30000,
+      visible: true 
+    }).catch(() => {
+      consola.warn('Login form not found, checking page content...');
     });
+
+    // Check if form exists
+    const formExists = await page.evaluate(() => {
+      return !!document.querySelector('form');
+    });
+    
+    if (!formExists) {
+      // Try to get the page content for debugging
+      const bodyText = await page.evaluate(() => document.body.innerText);
+      consola.error('Page content:', bodyText.substring(0, 500));
+      consola.error('Login form not found - Cloudflare may still be blocking');
+      return false;
+    }
 
     // Get CSRF token
     const csrfToken = await page.evaluate(() => {
@@ -406,6 +453,8 @@ async function authenticate(page) {
       await emailField.click({ clickCount: 3 });
       await emailField.type(IVAS_EMAIL, { delay: 50 });
       consola.info('Email filled');
+    } else {
+      consola.warn('Email field not found');
     }
 
     // Password
@@ -414,6 +463,8 @@ async function authenticate(page) {
       await passwordField.click({ clickCount: 3 });
       await passwordField.type(IVAS_PASSWORD, { delay: 50 });
       consola.info('Password filled');
+    } else {
+      consola.warn('Password field not found');
     }
 
     // Check "Remember me"
@@ -491,6 +542,22 @@ async function authenticate(page) {
       return true;
     }
 
+    // Check for error message
+    const errorMessage = await page.evaluate(() => {
+      const selectors = ['.alert-danger', '.alert-error', '.invalid-feedback', '.text-danger'];
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el) return el.textContent?.trim();
+      }
+      return null;
+    });
+
+    if (errorMessage) {
+      consola.error('Login failed:', errorMessage);
+    } else {
+      consola.error('Login failed: Unknown error');
+    }
+
     return false;
   } catch (error) {
     consola.error('Authentication error:', error.message);
@@ -530,6 +597,12 @@ async function getPortalData(page) {
 
     const cdrLabel = document.querySelector('#CdrLabel');
     if (cdrLabel) result.stats.cdr = cdrLabel.textContent?.trim() || '';
+
+    const lastWeekRevenue = document.querySelector('#LastWeekRevenueLabel');
+    if (lastWeekRevenue) result.stats.lastWeekRevenue = lastWeekRevenue.textContent?.trim() || '';
+
+    const lastWeekCdr = document.querySelector('#LastWeekCdrLabel');
+    if (lastWeekCdr) result.stats.lastWeekCdr = lastWeekCdr.textContent?.trim() || '';
 
     document.querySelectorAll('.social-grid-table tbody tr').forEach(row => {
       row.querySelectorAll('td').forEach(cell => {
@@ -673,7 +746,7 @@ app.get('/health', async (req, res) => {
     authenticated: isAuthenticated,
     environment: process.env.RAILWAY ? 'railway' : 'local',
     email: IVAS_EMAIL ? 'Set' : 'Not set',
-    captcha_key: TWO_CAPTCHA_API_KEY ? 'Set' : 'Not set'
+    captcha_key: TWO_CAPTCHA_API_KEY && TWO_CAPTCHA_API_KEY !== 'YOUR_2CAPTCHA_API_KEY' ? 'Set' : 'Not set'
   });
 });
 
@@ -744,6 +817,28 @@ app.get('/api/messages/:number', async (req, res) => {
   }
 });
 
+app.get('/api/live-sms', async (req, res) => {
+  try {
+    const browserInstance = await getBrowser();
+    const page = await browserInstance.newPage();
+    const data = await getPortalData(page);
+    res.json({ success: true, liveSms: data.liveTestSMS || [] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/top-apps', async (req, res) => {
+  try {
+    const browserInstance = await getBrowser();
+    const page = await browserInstance.newPage();
+    const data = await getPortalData(page);
+    res.json({ success: true, topApplications: data.topApplications || [] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.post('/api/login', async (req, res) => {
   try {
     const browserInstance = await getBrowser();
@@ -768,7 +863,11 @@ app.post('/api/logout', async (req, res) => {
 
 app.get('/api/status', async (req, res) => {
   const isAuthenticated = await checkLoginStatus();
-  res.json({ authenticated: isAuthenticated, sessionActive: !!authSession });
+  res.json({ 
+    authenticated: isAuthenticated, 
+    sessionActive: !!authSession,
+    email: IVAS_EMAIL ? 'Set' : 'Not set'
+  });
 });
 
 app.post('/api/cleanup', async (req, res) => {
