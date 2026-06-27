@@ -10,124 +10,16 @@ puppeteer.use(StealthPlugin());
 
 // ============ CONFIGURATION ============
 const PORT = process.env.PORT || 3000;
-const baseUrl = 'https://receive-sms-free.cc';
+const baseUrl = 'https://www.ivasms.com';
 const defaultRecheckDelay = 5; // seconds
+
+// ============ ENVIRONMENT VARIABLES ============
+const IVAS_EMAIL = "saeedgoraya982@gmail.com";
+const IVAS_PASSWORD = "77913011";
 
 // Enable trust proxy for Railway
 const app = express();
 app.set('trust proxy', true);
-
-// ============ COUNTRY MAP ============
-const countryNameMap = {
-  'United States': 'USA',
-  'USA': 'USA',
-  'United Kingdom': 'UK',
-  'UK': 'UK',
-  'Finland': 'Finland',
-  'Sweden': 'Sweden',
-  'Netherlands': 'Netherlands',
-  'Belgium': 'Belgium',
-  'Slovenia': 'Slovenia',
-  'Poland': 'Poland',
-  'Canada': 'Canada',
-  'France': 'France',
-  'Germany': 'Germany',
-  'Austria': 'Austria',
-  'China': 'China',
-  'Philippines': 'Philippines',
-  'Spain': 'Spain',
-  'Romania': 'Romania',
-  'Switzerland': 'Switzerland',
-  'Ukraine': 'Ukraine',
-  'Croatia': 'Croatia',
-  'Mexico': 'Mexico',
-  'Russia': 'Russia',
-  'Portugal': 'Portugal',
-  'HongKong': 'HongKong',
-  'Estonia': 'Estonia',
-  'Myanmar': 'Myanmar',
-  'Italy': 'Italy',
-  'Denmark': 'Denmark',
-  'Latvia': 'Latvia',
-  'Israel': 'Israel',
-  'Kazakhstan': 'Kazakhstan',
-  'India': 'India',
-  'Czech Republic': 'CzechRepublic',
-  'South Africa': 'SouthAfrica',
-  'Macao': 'Macao',
-  'Indonesia': 'Indonesia',
-  'Japan': 'Japan',
-  'Korea': 'Korea',
-  'Serbia': 'Serbia',
-  'Nigeria': 'Nigeria',
-  'Australia': 'Australia',
-  'Malaysia': 'Malaysia',
-  'Norway': 'Norway',
-  'Vietnam': 'Vietnam',
-  'New Zealand': 'NewZealand',
-  'Thailand': 'Thailand',
-  'Ireland': 'Ireland',
-  'Moldova': 'Moldova',
-  'Morocco': 'Morocco',
-  'Timor Leste': 'TimorLeste'
-};
-
-// Reverse map for URL formatting
-const urlCountryMap = {
-  'USA': 'USA',
-  'UK': 'UK',
-  'Finland': 'Finland',
-  'Sweden': 'Sweden',
-  'Netherlands': 'Netherlands',
-  'Belgium': 'Belgium',
-  'Slovenia': 'Slovenia',
-  'Poland': 'Poland',
-  'Canada': 'Canada',
-  'France': 'France',
-  'Germany': 'Germany',
-  'Austria': 'Austria',
-  'China': 'China',
-  'Philippines': 'Philippines',
-  'Spain': 'Spain',
-  'Romania': 'Romania',
-  'Switzerland': 'Switzerland',
-  'Ukraine': 'Ukraine',
-  'Croatia': 'Croatia',
-  'Mexico': 'Mexico',
-  'Russia': 'Russia',
-  'Portugal': 'Portugal',
-  'HongKong': 'HongKong',
-  'Estonia': 'Estonia',
-  'Myanmar': 'Myanmar',
-  'Italy': 'Italy',
-  'Denmark': 'Denmark',
-  'Latvia': 'Latvia',
-  'Israel': 'Israel',
-  'Kazakhstan': 'Kazakhstan',
-  'India': 'India',
-  'CzechRepublic': 'CzechRepublic',
-  'SouthAfrica': 'SouthAfrica',
-  'Macao': 'Macao',
-  'Indonesia': 'Indonesia',
-  'Japan': 'Japan',
-  'Korea': 'Korea',
-  'Serbia': 'Serbia',
-  'Nigeria': 'Nigeria',
-  'Australia': 'Australia',
-  'Malaysia': 'Malaysia',
-  'Norway': 'Norway',
-  'Vietnam': 'Vietnam',
-  'NewZealand': 'NewZealand',
-  'Thailand': 'Thailand',
-  'Ireland': 'Ireland',
-  'Moldova': 'Moldova',
-  'Morocco': 'Morocco',
-  'TimorLeste': 'TimorLeste'
-};
-
-let cachedCountries = null;
-let cacheTimestamp = 0;
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
 // ============ HELPER FUNCTIONS ============
 function tryParseOtpCode(message) {
@@ -153,121 +45,15 @@ function parseTimeAgo(agoText) {
   return 0;
 }
 
-function stringifyTriggerOtpTimeDiff(askedAt) {
-  const diff = Date.now() - askedAt;
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${seconds % 60}s`;
-}
-
 function delay(seconds) {
   return new Promise(resolve => setTimeout(resolve, seconds * 1000));
-}
-
-// ============ COUNTRY FETCHING ============
-async function fetchCountriesWithNumbers(page) {
-  try {
-    consola.info('Fetching countries from /regions/ page...');
-    await page.goto(`${baseUrl}/regions/`, { 
-      waitUntil: 'networkidle2', 
-      timeout: 30000 
-    });
-    
-    // Wait for Cloudflare
-    const passed = await waitForCloudflare(page);
-    if (!passed) {
-      consola.warn('Could not bypass Cloudflare for countries');
-      return [];
-    }
-    
-    await delay(2);
-    
-    // Extract countries with number counts
-    const countriesData = await page.evaluate(() => {
-      const results = [];
-      const cards = document.querySelectorAll('#countryGrid .number-card');
-      
-      cards.forEach(card => {
-        const link = card.closest('a');
-        if (!link) return;
-        
-        const href = link.getAttribute('href');
-        const nameEl = card.querySelector('h3');
-        const countEl = card.querySelector('.text-secondary');
-        
-        if (nameEl && countEl) {
-          const fullName = nameEl.textContent?.trim() || '';
-          // Extract country name (remove "Phone Number" suffix)
-          const name = fullName.replace(/Phone Number$/, '').trim();
-          const countText = countEl.textContent?.trim() || '0 Numbers';
-          const count = parseInt(countText.replace(/[^0-9]/g, '')) || 0;
-          
-          // Extract country code from href
-          const match = href.match(/Free-(.+?)-Phone-Number/);
-          const code = match ? match[1] : '';
-          
-          if (name && count > 0) {
-            results.push({
-              name: name,
-              code: code,
-              count: count,
-              url: href
-            });
-          }
-        }
-      });
-      
-      return results;
-    });
-    
-    consola.success(`Found ${countriesData.length} countries with numbers`);
-    return countriesData;
-  } catch (error) {
-    consola.error('Error fetching countries:', error.message);
-    return [];
-  }
-}
-
-async function getCountriesWithNumbers() {
-  // Check cache
-  const now = Date.now();
-  if (cachedCountries && (now - cacheTimestamp) < CACHE_DURATION) {
-    consola.info('Using cached countries list');
-    return cachedCountries;
-  }
-  
-  const browserInstance = await getBrowser();
-  const page = await browserInstance.newPage();
-  
-  try {
-    const countries = await fetchCountriesWithNumbers(page);
-    cachedCountries = countries;
-    cacheTimestamp = now;
-    return countries;
-  } finally {
-    await page.close().catch(() => {});
-  }
-}
-
-// ============ URL FUNCTIONS ============
-function getCountryUrl(country) {
-  const code = urlCountryMap[country];
-  if (!code) return '';
-  return `${baseUrl}/Free-${code}-Phone-Number/`;
-}
-
-function getPhoneNumberUrl(country, phone) {
-  const cleanPhone = phone.replace(/[^0-9]/g, '');
-  const withCountryCode = country === 'USA' && !cleanPhone.startsWith('1') 
-    ? `1${cleanPhone}` 
-    : cleanPhone;
-  return `${getCountryUrl(country)}${withCountryCode}/`;
 }
 
 // ============ BROWSER MANAGEMENT ============
 let browser = null;
 let isShuttingDown = false;
+let authCookies = null;
+let authSession = null;
 
 async function getBrowser() {
   if (!browser) {
@@ -327,6 +113,8 @@ async function getBrowser() {
       browser.on('disconnected', () => {
         consola.warn('Browser disconnected');
         browser = null;
+        authCookies = null;
+        authSession = null;
       });
       
       consola.success('Browser launched successfully with stealth');
@@ -339,307 +127,314 @@ async function getBrowser() {
   return browser;
 }
 
-// ============ CORE FUNCTIONS ============
-async function waitForCloudflare(page, timeout = 30000) {
-  const startTime = Date.now();
-  
-  while (Date.now() - startTime < timeout) {
-    const title = await page.title().catch(() => '');
-    
-    if (title.includes('Attention Required') || title.includes('Cloudflare')) {
-      consola.info('Cloudflare detected, waiting...');
-      await delay(3);
-      continue;
-    }
-    
-    // Check if we're on the actual site
-    const url = page.url();
-    if (url.includes('receive-sms-free.cc') && !url.includes('challenge')) {
-      consola.success('Bypassed Cloudflare');
-      return true;
-    }
-    
-    await delay(1);
+// ============ AUTHENTICATION ============
+async function authenticate(page) {
+  if (authCookies && authSession) {
+    consola.info('Using existing session');
+    return true;
   }
-  
-  return false;
-}
 
-async function numberIsOnline(page, country, phoneNumber) {
-  const url = getPhoneNumberUrl(country, phoneNumber);
+  if (!IVAS_EMAIL || !IVAS_PASSWORD) {
+    consola.error('IVAS_EMAIL and IVAS_PASSWORD environment variables must be set');
+    throw new Error('Missing credentials. Set IVAS_EMAIL and IVAS_PASSWORD environment variables.');
+  }
+
+  consola.info('Authenticating to iVAS...');
+  
   try {
-    consola.info(`Checking URL: ${url}`);
-    await page.goto(url, { 
-      waitUntil: 'networkidle2', 
+    await page.goto(`${baseUrl}/login`, {
+      waitUntil: 'networkidle2',
       timeout: 30000
     });
+
+    // Get CSRF token
+    const token = await page.evaluate(() => {
+      const tokenInput = document.querySelector('input[name="_token"]');
+      return tokenInput ? tokenInput.value : null;
+    });
+    consola.info(`CSRF Token: ${token || 'Not found'}`);
+
+    // Fill in login form
+    await page.type('#card-email', IVAS_EMAIL);
+    await page.type('#card-password', IVAS_PASSWORD);
+
+    // Check "Remember me"
+    await page.click('#card-checkbox').catch(() => {});
+
+    // Wait for Cloudflare Turnstile to complete
+    consola.info('Waiting for Cloudflare Turnstile...');
+    await page.waitForSelector('.cf-turnstile', { timeout: 15000 }).catch(() => {});
+    await delay(5);
+
+    // Submit the form
+    consola.info('Submitting login form...');
+    await page.evaluate(() => {
+      const form = document.querySelector('form');
+      if (form) form.submit();
+    });
+
+    // Wait for navigation to portal
+    await page.waitForNavigation({
+      waitUntil: 'networkidle2',
+      timeout: 30000
+    }).catch(() => {});
+
+    const currentUrl = page.url();
+    consola.info(`Current URL after login: ${currentUrl}`);
     
-    // Wait for Cloudflare
-    const passed = await waitForCloudflare(page);
-    if (!passed) {
-      consola.warn('Could not bypass Cloudflare');
+    if (currentUrl.includes('/portal') || currentUrl.includes('/dashboard')) {
+      consola.success('Authentication successful!');
+      
+      authCookies = await page.cookies();
+      authSession = {
+        url: currentUrl,
+        timestamp: Date.now()
+      };
+      
+      return true;
+    } else {
+      const errorMessage = await page.evaluate(() => {
+        const errorEl = document.querySelector('.alert-danger, .alert-error, .invalid-feedback, .text-danger');
+        return errorEl ? errorEl.textContent?.trim() : null;
+      });
+      
+      consola.error('Authentication failed:', errorMessage || 'Unknown error');
       return false;
     }
-    
-    await delay(2);
-    
-    // Check if page loaded properly
-    const hasContent = await page.evaluate(() => {
-      const smsItems = document.querySelectorAll('.sms-item, .casetext, .row');
-      return smsItems.length > 0 || document.body.innerText.length > 1000;
-    });
-    
-    return hasContent;
   } catch (error) {
-    consola.warn('Failed to check number online:', error.message);
+    consola.error('Authentication error:', error.message);
     return false;
   }
 }
 
-async function parseMessages(page) {
-  try {
-    const currentUrl = page.url();
+// ============ PORTAL / DASHBOARD ============
+async function getPortalData(page) {
+  await authenticate(page);
+  
+  consola.info('Fetching portal data...');
+  await page.goto(`${baseUrl}/portal`, {
+    waitUntil: 'networkidle2',
+    timeout: 30000
+  });
+
+  const portalData = await page.evaluate(() => {
+    const result = {
+      user: {
+        name: '',
+        email: '',
+        level: ''
+      },
+      stats: {
+        revenue: '',
+        cdr: '',
+        lastWeekRevenue: '',
+        lastWeekCdr: ''
+      },
+      topApplications: [],
+      topRanges: [],
+      liveTestSMS: [],
+      accountCode: ''
+    };
+
+    // Get user info
+    const userPanel = document.querySelector('.user-panel .info a');
+    if (userPanel) {
+      result.user.name = userPanel.textContent?.trim() || '';
+    }
     
-    // Wait for content to load
-    await page.waitForSelector('.sms-item, .casetext > .row, .sms-content', { timeout: 10000 }).catch(() => {});
-    await delay(1);
-    
-    // Parse SMS messages from the page
-    const messages = await page.evaluate(() => {
-      const results = [];
-      
-      // Try different selectors
-      const items = document.querySelectorAll('.sms-item, .casetext > .row, .message-item');
-      
-      items.forEach(item => {
-        const senderEl = item.querySelector('.sender-badge, .from, .sender');
-        const timeEl = item.querySelector('.time-text, .ago, .date, .time');
-        const contentEl = item.querySelector('.sms-content, .message, .text, .content, .casetext');
+    const emailEl = document.querySelector('.user-panel .info a[style*="font-size: 10px"]');
+    if (emailEl) {
+      result.user.email = emailEl.textContent?.trim() || '';
+    }
+
+    // Get account code
+    const accountCodeEl = document.querySelector('.account-code span');
+    if (accountCodeEl) {
+      result.accountCode = accountCodeEl.textContent?.trim() || '';
+    }
+
+    // Get revenue stats
+    const revenueLabel = document.querySelector('#RevenueLabel');
+    if (revenueLabel) {
+      result.stats.revenue = revenueLabel.textContent?.trim() || '';
+    }
+
+    const cdrLabel = document.querySelector('#CdrLabel');
+    if (cdrLabel) {
+      result.stats.cdr = cdrLabel.textContent?.trim() || '';
+    }
+
+    const lastWeekRevenue = document.querySelector('#LastWeekRevenueLabel');
+    if (lastWeekRevenue) {
+      result.stats.lastWeekRevenue = lastWeekRevenue.textContent?.trim() || '';
+    }
+
+    const lastWeekCdr = document.querySelector('#LastWeekCdrLabel');
+    if (lastWeekCdr) {
+      result.stats.lastWeekCdr = lastWeekCdr.textContent?.trim() || '';
+    }
+
+    // Get top applications
+    const appRows = document.querySelectorAll('.social-grid-table tbody tr');
+    appRows.forEach(row => {
+      const cells = row.querySelectorAll('td');
+      cells.forEach(cell => {
+        const icon = cell.querySelector('i');
+        const nameEl = cell.querySelector('p');
+        const countEl = cell.querySelector('small');
         
-        let message = '';
-        if (contentEl) {
-          message = contentEl.textContent?.trim() || '';
-        } else {
-          // Fallback: get all text
-          message = item.textContent?.trim() || '';
-        }
-        
-        if (message.length > 0) {
-          results.push({
-            sender: senderEl ? senderEl.textContent?.trim() || '' : '',
-            time: timeEl ? timeEl.textContent?.trim() || '' : '',
-            message: message
+        if (nameEl && countEl) {
+          const name = nameEl.textContent?.trim() || '';
+          const count = countEl.textContent?.trim() || '';
+          const iconClass = icon ? icon.className : '';
+          
+          result.topApplications.push({
+            name: name,
+            count: count,
+            icon: iconClass
           });
         }
       });
-      
-      // If no messages found with selectors, try to get all text
-      if (results.length === 0) {
-        const allText = document.body.innerText;
-        const lines = allText.split('\n').filter(line => line.trim().length > 10);
-        for (const line of lines) {
-          if (line.match(/\d{4,6}/) || line.match(/verification|code|otp/i)) {
+    });
+
+    // Get live test SMS
+    const smsRows = document.querySelectorAll('#LiveTestSMS tr');
+    smsRows.forEach(row => {
+      const cells = row.querySelectorAll('td');
+      if (cells.length >= 3) {
+        const nameEl = cells[0]?.querySelector('h6 a');
+        const numberEl = cells[0]?.querySelector('p');
+        const cliEl = cells[1]?.querySelector('.fw-semi-bold');
+        const messageEl = cells[2];
+        
+        result.liveTestSMS.push({
+          name: nameEl ? nameEl.textContent?.trim() : '',
+          number: numberEl ? numberEl.textContent?.trim() : '',
+          cli: cliEl ? cliEl.textContent?.trim() : '',
+          message: messageEl ? messageEl.textContent?.trim() : ''
+        });
+      }
+    });
+
+    return result;
+  });
+
+  return portalData;
+}
+
+// ============ NUMBERS ============
+async function getNumbers(page) {
+  await authenticate(page);
+  
+  consola.info('Fetching numbers...');
+  await page.goto(`${baseUrl}/portal/numbers`, {
+    waitUntil: 'networkidle2',
+    timeout: 30000
+  });
+
+  const numbers = await page.evaluate(() => {
+    const results = [];
+    const rows = document.querySelectorAll('.table tbody tr');
+    
+    rows.forEach(row => {
+      const cells = row.querySelectorAll('td');
+      if (cells.length >= 2) {
+        const numberEl = cells[0]?.querySelector('.fw-semi-bold, .number');
+        const statusEl = cells[1]?.querySelector('.badge, .status');
+        
+        const number = numberEl ? numberEl.textContent?.trim() : '';
+        const status = statusEl ? statusEl.textContent?.trim() : '';
+        
+        if (number) {
+          results.push({
+            number: number,
+            status: status || 'Unknown'
+          });
+        }
+      }
+    });
+    
+    return results;
+  });
+
+  return numbers;
+}
+
+// ============ MESSAGES ============
+async function getMessages(page, number) {
+  await authenticate(page);
+  
+  consola.info(`Fetching messages for ${number}...`);
+  
+  // Try to find messages - could be in different sections
+  await page.goto(`${baseUrl}/portal/sms/test/sms`, {
+    waitUntil: 'networkidle2',
+    timeout: 30000
+  });
+
+  const messages = await page.evaluate((searchNumber) => {
+    const results = [];
+    const rows = document.querySelectorAll('.table tbody tr');
+    
+    rows.forEach(row => {
+      const cells = row.querySelectorAll('td');
+      if (cells.length >= 3) {
+        const numberEl = cells[0]?.querySelector('.number, .fw-semi-bold');
+        const messageEl = cells[1];
+        const timeEl = cells[2];
+        
+        const numberText = numberEl ? numberEl.textContent?.trim() : '';
+        const message = messageEl ? messageEl.textContent?.trim() : '';
+        const time = timeEl ? timeEl.textContent?.trim() : '';
+        
+        // If searching for specific number, filter
+        if (!searchNumber || numberText.includes(searchNumber)) {
+          if (message) {
+            const otpMatch = message.match(/\b\d{4,6}\b/);
             results.push({
-              sender: 'Unknown',
-              time: 'now',
-              message: line.trim()
+              number: numberText,
+              message: message,
+              time: time || 'now',
+              otp: otpMatch ? otpMatch[0] : undefined
             });
           }
         }
       }
-      
-      return results;
     });
+    
+    return results;
+  }, number);
 
-    consola.info(`Found ${messages.length} messages on page`);
-
-    return messages.map((msg) => ({
-      ago: parseTimeAgo(msg.time) || Date.now(),
-      agoText: msg.time || 'now',
-      message: msg.message,
-      sender: msg.sender,
-      url: currentUrl,
-      otp: tryParseOtpCode(msg.message)
-    }));
-  } catch (error) {
-    consola.warn('Error parsing messages:', error.message);
-    return [];
-  }
+  return messages;
 }
 
-async function recursivelyCheckMessages(page, askedAt, matcher, recheckDelay, attempts = 0) {
+// ============ CHECK STATUS ============
+async function checkLoginStatus() {
+  if (!authCookies) return false;
+  
   try {
-    // Wait a bit for messages to load
-    await delay(2);
+    const browserInstance = await getBrowser();
+    const page = await browserInstance.newPage();
     
-    // Refresh the page to get new messages
-    await page.reload({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
-    await waitForCloudflare(page);
-    await delay(1);
-
-    const parsed = (await parseMessages(page)) || [];
-    if (!parsed.length) {
-      if (attempts < 3) {
-        consola.info(`No messages found, attempt ${attempts + 1}/3, retrying...`);
-        await delay(recheckDelay);
-        return recursivelyCheckMessages(page, askedAt, matcher, recheckDelay, attempts + 1);
-      }
-      return [];
-    }
-
-    const matches = parsed.filter(
-      (parsed) =>
-        parsed?.ago >= askedAt &&
-        (Array.isArray(matcher) 
-          ? matcher.some((m) => parsed?.message?.toLowerCase().includes(m.toLowerCase())) 
-          : parsed?.message?.toLowerCase().includes(matcher.toLowerCase()))
-    );
-
-    if (matches.length) {
-      consola.success(`Found ${matches.length} matching messages!`);
-      return matches;
-    }
-
-    consola.info(
-      `Not found message within ${stringifyTriggerOtpTimeDiff(askedAt)} range, latest ${
-        parsed[0]?.agoText || 'unknown'
-      }, will try after ${recheckDelay}s...`
-    );
-
-    await delay(recheckDelay);
-    return recursivelyCheckMessages(page, askedAt, matcher, recheckDelay, 0);
-  } catch (error) {
-    consola.warn('Error in recursive check:', error.message);
-    return [];
-  }
-}
-
-async function handleReceiveSmsFreeCC(page, options) {
-  consola.start('Starting automated check for OTP');
-  consola.start(`Checking number is online at ${baseUrl}`);
-  const isAlive = await numberIsOnline(page, options.country, options.phoneNumber);
-  if (!isAlive) {
-    throw new Error('Number is offline or unreachable');
-  }
-
-  consola.success(`Number ${options.phoneNumber} is online`);
-
-  const match = await recursivelyCheckMessages(
-    page,
-    options.askedOtpAt || 0,
-    options.matcher,
-    options?.interval || defaultRecheckDelay
-  );
-
-  return match;
-}
-
-async function parseNumbersPage(page, country, url) {
-  try {
-    consola.info(`Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    
-    // Wait for Cloudflare
-    const passed = await waitForCloudflare(page);
-    if (!passed) {
-      consola.warn('Could not bypass Cloudflare');
-      return { numbers: [] };
-    }
-    
-    // Wait for content to load
-    await page.waitForSelector('#numbersGrid, .number-card, .col-12', { timeout: 15000 }).catch(() => {});
-    await delay(2);
-
-    // Extract phone numbers from the page
-    const numbers = await page.evaluate(() => {
-      const results = [];
-      
-      // Try to find numbers in links
-      const links = document.querySelectorAll('a[href*="Phone-Number/"]');
-      links.forEach(link => {
-        const href = link.href;
-        // Extract phone number from href
-        const match = href.match(/\/(\d{10,15})\/?$/);
-        if (match && !results.includes(match[1])) {
-          results.push(match[1]);
-        }
-      });
-      
-      // If no numbers found in links, try to find in text
-      if (results.length === 0) {
-        const text = document.body.innerText;
-        const phoneMatches = text.match(/\+\d{1,3}\s*[\d\s-]{7,15}/g);
-        if (phoneMatches) {
-          phoneMatches.forEach(phone => {
-            const clean = phone.replace(/[^0-9]/g, '');
-            if (clean.length >= 10 && !results.includes(clean)) {
-              results.push(clean);
-            }
-          });
-        }
-      }
-      
-      return results;
-    });
-
-    consola.success(`Parsed ${numbers.length} phone numbers`);
-
-    // Check for pagination
-    let nextPageUrl = null;
     try {
-      const paginationLinks = await page.$$eval('.pagination a', (links) => {
-        for (const link of links) {
-          const text = link.textContent?.trim() || '';
-          if (text.includes('»') || text.includes('Next') || text.includes('→')) {
-            return link.href;
-          }
-        }
-        return null;
+      await page.setCookie(...authCookies);
+      await page.goto(`${baseUrl}/portal`, {
+        waitUntil: 'networkidle2',
+        timeout: 10000
       });
       
-      if (paginationLinks && paginationLinks !== url) {
-        nextPageUrl = paginationLinks;
-        consola.success(`Found next page: ${nextPageUrl}`);
-      }
-    } catch (e) {
-      consola.info('No pagination found');
+      const url = page.url();
+      return url.includes('/portal');
+    } finally {
+      await page.close().catch(() => {});
     }
-
-    return {
-      numbers: numbers,
-      nextPageUrl
-    };
   } catch (error) {
-    consola.error('Error parsing numbers page:', error.message);
-    return { numbers: [] };
+    return false;
   }
-}
-
-async function getReceiveSmsFreePhones(page, country, nextUrl) {
-  consola.start(`Starting parsing numbers for ${country}`);
-  const url = nextUrl ?? getCountryUrl(country);
-
-  if (!url) {
-    consola.error(`Invalid URL for country: ${country}`);
-    return { phones: [] };
-  }
-
-  consola.info(`Using URL: ${url}`);
-
-  const { numbers, nextPageUrl } = await parseNumbersPage(page, country, url);
-
-  return {
-    phones: numbers.map((phone) => ({ 
-      phone, 
-      url: getPhoneNumberUrl(country, phone) 
-    })),
-    nextPageUrl
-  };
 }
 
 // ============ EXPRESS APP ============
 
-// Rate limiting with trust proxy fix
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -656,229 +451,231 @@ app.use(express.json());
 app.use('/api/', limiter);
 
 // ============ HEALTH CHECK ============
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+  const isAuthenticated = await checkLoginStatus();
+  
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    service: 'sms-receiver',
+    service: 'ivas-sms-monitor',
     browser: browser ? 'connected' : 'disconnected',
-    environment: process.env.RAILWAY ? 'railway' : 'local'
+    authenticated: isAuthenticated,
+    environment: process.env.RAILWAY ? 'railway' : 'local',
+    email: IVAS_EMAIL ? 'Set' : 'Not set'
   });
 });
 
 // ============ API ENDPOINTS ============
 
-// Get available countries with number counts
-app.get('/api/countries', async (req, res) => {
+// Get portal/dashboard data
+app.get('/api/portal', async (req, res) => {
   try {
-    const countries = await getCountriesWithNumbers();
-    res.json({ 
-      success: true,
-      countries: countries.map(c => ({
-        name: c.name,
-        code: c.code,
-        count: c.count
-      }))
-    });
+    const browserInstance = await getBrowser();
+    const page = await browserInstance.newPage();
+    
+    try {
+      const data = await getPortalData(page);
+      res.json({
+        success: true,
+        data: data
+      });
+    } finally {
+      await page.close().catch(() => {});
+    }
   } catch (error) {
-    consola.error('Error fetching countries:', error);
+    consola.error('Error fetching portal:', error);
     res.status(500).json({ 
-      error: 'Failed to fetch countries',
+      error: 'Failed to fetch portal data',
       message: error.message
     });
   }
 });
 
-// Get phone numbers for a country
-app.get('/api/numbers/:country', async (req, res) => {
+// Get phone numbers
+app.get('/api/numbers', async (req, res) => {
   try {
-    const { country } = req.params;
-    const { page } = req.query;
-    
-    // Check if country is valid
-    const countries = await getCountriesWithNumbers();
-    const validCountry = countries.find(c => c.name === country || c.code === country);
-    if (!validCountry) {
-      return res.status(400).json({ error: 'Invalid country' });
-    }
-
     const browserInstance = await getBrowser();
-    const pageInstance = await browserInstance.newPage();
+    const page = await browserInstance.newPage();
     
     try {
-      const result = await getReceiveSmsFreePhones(
-        pageInstance,
-        validCountry.code,
-        page || undefined
-      );
-      
+      const numbers = await getNumbers(page);
       res.json({
         success: true,
-        country: validCountry.name,
-        ...result
+        numbers: numbers
       });
     } finally {
-      await pageInstance.close().catch(() => {});
+      await page.close().catch(() => {});
     }
   } catch (error) {
     consola.error('Error fetching numbers:', error);
     res.status(500).json({ 
-      error: 'Failed to fetch phone numbers',
-      message: error instanceof Error ? error.message : 'Unknown error'
+      error: 'Failed to fetch numbers',
+      message: error.message
     });
   }
 });
 
-// Get messages for a specific phone number
-app.get('/api/messages/:country/:phone', async (req, res) => {
+// Get messages for a specific number
+app.get('/api/messages/:number', async (req, res) => {
   try {
-    const { country, phone } = req.params;
+    const { number } = req.params;
     
     const browserInstance = await getBrowser();
-    const pageInstance = await browserInstance.newPage();
+    const page = await browserInstance.newPage();
     
     try {
-      const url = getPhoneNumberUrl(country, phone);
-      await pageInstance.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-      await waitForCloudflare(pageInstance);
-      
-      const messages = await parseMessages(pageInstance);
-      
+      const messages = await getMessages(page, number);
       res.json({
         success: true,
-        country,
-        phone,
-        messages
+        number: number,
+        messages: messages
       });
     } finally {
-      await pageInstance.close().catch(() => {});
+      await page.close().catch(() => {});
     }
   } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Wait for OTP message
-app.post('/api/wait-for-otp', async (req, res) => {
-  try {
-    const { 
-      country, 
-      phoneNumber, 
-      matcher, 
-      askedOtpAt,
-      interval = 5,
-      timeout = 180000 
-    } = req.body;
-
-    if (!country || !phoneNumber || !matcher) {
-      return res.status(400).json({ 
-        error: 'Missing required fields: country, phoneNumber, matcher' 
-      });
-    }
-
-    const browserInstance = await getBrowser();
-    const pageInstance = await browserInstance.newPage();
-    
-    try {
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Timeout waiting for OTP')), timeout);
-      });
-
-      const otpPromise = handleReceiveSmsFreeCC(pageInstance, {
-        country,
-        phoneNumber,
-        matcher,
-        askedOtpAt: askedOtpAt || Date.now(),
-        interval
-      });
-
-      const result = await Promise.race([otpPromise, timeoutPromise]);
-      
-      res.json({
-        success: true,
-        ...result
-      });
-    } finally {
-      await pageInstance.close().catch(() => {});
-    }
-  } catch (error) {
-    consola.error('Error waiting for OTP:', error);
+    consola.error('Error fetching messages:', error);
     res.status(500).json({ 
-      error: 'Failed to get OTP',
-      message: error instanceof Error ? error.message : 'Unknown error'
+      error: 'Failed to fetch messages',
+      message: error.message
     });
   }
 });
 
-// Get phone number URL
-app.get('/api/phone-url/:country/:phone', (req, res) => {
+// Get live test SMS
+app.get('/api/live-sms', async (req, res) => {
   try {
-    const { country, phone } = req.params;
+    const browserInstance = await getBrowser();
+    const page = await browserInstance.newPage();
     
-    if (!country || !phone) {
-      return res.status(400).json({ error: 'Missing country or phone' });
+    try {
+      const data = await getPortalData(page);
+      res.json({
+        success: true,
+        liveSms: data.liveTestSMS || []
+      });
+    } finally {
+      await page.close().catch(() => {});
     }
+  } catch (error) {
+    consola.error('Error fetching live SMS:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch live SMS',
+      message: error.message
+    });
+  }
+});
 
-    const url = getPhoneNumberUrl(country, phone);
-    const countryUrl = getCountryUrl(country);
+// Get top applications
+app.get('/api/top-apps', async (req, res) => {
+  try {
+    const browserInstance = await getBrowser();
+    const page = await browserInstance.newPage();
+    
+    try {
+      const data = await getPortalData(page);
+      res.json({
+        success: true,
+        topApplications: data.topApplications || []
+      });
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } catch (error) {
+    consola.error('Error fetching top apps:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch top applications',
+      message: error.message
+    });
+  }
+});
+
+// Login endpoint
+app.post('/api/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    const useEmail = email || IVAS_EMAIL;
+    const usePassword = password || IVAS_PASSWORD;
+    
+    if (!useEmail || !usePassword) {
+      return res.status(400).json({
+        error: 'Email and password required. Set IVAS_EMAIL and IVAS_PASSWORD env vars or provide in request.'
+      });
+    }
+    
+    const browserInstance = await getBrowser();
+    const page = await browserInstance.newPage();
+    
+    try {
+      const originalEmail = IVAS_EMAIL;
+      const originalPassword = IVAS_PASSWORD;
+      
+      process.env.IVAS_EMAIL = useEmail;
+      process.env.IVAS_PASSWORD = usePassword;
+      
+      authCookies = null;
+      authSession = null;
+      
+      const success = await authenticate(page);
+      
+      process.env.IVAS_EMAIL = originalEmail;
+      process.env.IVAS_PASSWORD = originalPassword;
+      
+      if (success) {
+        res.json({
+          success: true,
+          message: 'Login successful',
+          redirect: '/portal'
+        });
+      } else {
+        res.status(401).json({
+          success: false,
+          error: 'Login failed. Please check your credentials.'
+        });
+      }
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } catch (error) {
+    consola.error('Login error:', error);
+    res.status(500).json({ 
+      error: 'Login failed',
+      message: error.message
+    });
+  }
+});
+
+// Logout endpoint
+app.post('/api/logout', async (req, res) => {
+  try {
+    authCookies = null;
+    authSession = null;
+    
+    if (browser) {
+      const pages = await browser.pages();
+      for (const page of pages) {
+        await page.deleteCookie(...await page.cookies()).catch(() => {});
+      }
+    }
     
     res.json({
       success: true,
-      url,
-      countryUrl,
-      country,
-      phone
+      message: 'Logged out successfully'
     });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to generate URL' });
-  }
-});
-
-// Debug endpoint
-app.get('/api/debug/:country', async (req, res) => {
-  try {
-    const { country } = req.params;
-    const browserInstance = await getBrowser();
-    const pageInstance = await browserInstance.newPage();
-    
-    try {
-      const url = getCountryUrl(country);
-      await pageInstance.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-      await waitForCloudflare(pageInstance);
-      
-      const debug = await pageInstance.evaluate(() => {
-        const numbers = [];
-        const links = document.querySelectorAll('a[href*="Phone-Number/"]');
-        links.forEach(link => {
-          const href = link.href;
-          const match = href.match(/\/(\d{10,15})\/?$/);
-          if (match) {
-            numbers.push(match[1]);
-          }
-        });
-        
-        return {
-          title: document.title,
-          url: window.location.href,
-          linksFound: links.length,
-          numbers: numbers.slice(0, 20),
-          pageText: document.body.innerText.substring(0, 1000),
-          hasNumbersGrid: !!document.querySelector('#numbersGrid'),
-          hasNumberCards: !!document.querySelector('.number-card')
-        };
-      });
-      
-      res.json({
-        success: true,
-        url,
-        debug
-      });
-    } finally {
-      await pageInstance.close().catch(() => {});
-    }
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// Check login status
+app.get('/api/status', async (req, res) => {
+  const isAuthenticated = await checkLoginStatus();
+  res.json({
+    authenticated: isAuthenticated,
+    email: IVAS_EMAIL ? 'Set' : 'Not set',
+    sessionActive: !!authSession
+  });
 });
 
 // Cleanup endpoint
@@ -887,6 +684,8 @@ app.post('/api/cleanup', async (req, res) => {
     if (browser) {
       await browser.close();
       browser = null;
+      authCookies = null;
+      authSession = null;
     }
     res.json({ success: true, message: 'Browser closed' });
   } catch (error) {
@@ -899,12 +698,17 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   consola.success(`🚀 Server running on port ${PORT}`);
   consola.info(`📍 Health check: http://localhost:${PORT}/health`);
   consola.info(`📱 API endpoints:`);
-  consola.info(`   GET  /api/countries - Dynamic countries with counts`);
-  consola.info(`   GET  /api/numbers/:country`);
-  consola.info(`   GET  /api/messages/:country/:phone`);
-  consola.info(`   POST /api/wait-for-otp`);
-  consola.info(`   GET  /api/debug/:country`);
+  consola.info(`   GET  /api/portal - Full dashboard data`);
+  consola.info(`   GET  /api/numbers - Your phone numbers`);
+  consola.info(`   GET  /api/messages/:number - Messages for a number`);
+  consola.info(`   GET  /api/live-sms - Live test SMS`);
+  consola.info(`   GET  /api/top-apps - Top applications`);
+  consola.info(`   POST /api/login - Login to iVAS`);
+  consola.info(`   POST /api/logout - Logout`);
+  consola.info(`   GET  /api/status - Check login status`);
   consola.info(`🔧 Running on: ${process.env.RAILWAY ? 'Railway' : 'Local'}`);
+  consola.info(`📧 Email: ${IVAS_EMAIL ? 'Set' : 'NOT SET - Please set IVAS_EMAIL'}`);
+  consola.info(`🔑 Password: ${IVAS_PASSWORD ? 'Set' : 'NOT SET - Please set IVAS_PASSWORD'}`);
 });
 
 // ============ GRACEFUL SHUTDOWN ============
