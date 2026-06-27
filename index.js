@@ -127,7 +127,7 @@ async function getBrowser() {
   return browser;
 }
 
-// ============ AUTHENTICATION WITH BETTER TURNSTILE ============
+// ============ AUTHENTICATION WITH BETTER LOADING ============
 async function authenticate(page) {
   if (authCookies && authSession) {
     consola.info('Using existing session');
@@ -142,15 +142,80 @@ async function authenticate(page) {
   consola.info('Authenticating to iVAS...');
   
   try {
-    // Navigate to login page
+    // Navigate to login page with more wait options
     consola.info('Navigating to login page...');
-    await page.goto(`${baseUrl}/login`, {
+    const response = await page.goto(`${baseUrl}/login`, {
       waitUntil: 'networkidle2',
-      timeout: 30000
+      timeout: 60000
     });
 
-    // Wait a moment for page to stabilize
-    await delay(2);
+    // Check response status
+    consola.info(`Response status: ${response ? response.status() : 'No response'}`);
+
+    // Wait for page to fully load
+    await page.waitForFunction(
+      () => document.readyState === 'complete',
+      { timeout: 30000 }
+    ).catch(() => consola.warn('Page did not fully load'));
+
+    await delay(3);
+
+    // Check if we're already logged in (redirected to portal)
+    const currentUrl = page.url();
+    consola.info(`Current URL: ${currentUrl}`);
+    
+    if (currentUrl.includes('/portal') || currentUrl.includes('/dashboard')) {
+      consola.info('Already logged in!');
+      authCookies = await page.cookies();
+      authSession = {
+        url: currentUrl,
+        timestamp: Date.now()
+      };
+      return true;
+    }
+
+    // Take screenshot for debugging
+    await page.screenshot({ path: 'login-page.png' }).catch(() => {
+      consola.warn('Could not take screenshot');
+    });
+
+    // Get page content to debug
+    const pageTitle = await page.title();
+    consola.info(`Page title: ${pageTitle}`);
+
+    // Check for Cloudflare challenge
+    const hasCloudflare = await page.evaluate(() => {
+      return document.body.innerText.includes('Cloudflare') || 
+             document.body.innerText.includes('Just a moment') ||
+             document.body.innerText.includes('Attention Required');
+    });
+
+    if (hasCloudflare) {
+      consola.warn('Cloudflare challenge detected, waiting...');
+      await delay(10);
+    }
+
+    // Wait for the login form to be visible
+    consola.info('Waiting for login form...');
+    await page.waitForSelector('form, #card-email, input[name="email"]', { 
+      timeout: 30000,
+      visible: true 
+    }).catch(() => {
+      consola.warn('Login form not found, checking page content...');
+    });
+
+    // Check if form exists
+    const formExists = await page.evaluate(() => {
+      return !!document.querySelector('form');
+    });
+    consola.info(`Form exists: ${formExists}`);
+
+    if (!formExists) {
+      // Log the page content for debugging
+      const bodyText = await page.evaluate(() => document.body.innerText);
+      consola.error('Page content:', bodyText.substring(0, 500));
+      throw new Error('Login form not found on page');
+    }
 
     // Get CSRF token
     const token = await page.evaluate(() => {
@@ -159,15 +224,36 @@ async function authenticate(page) {
     });
     consola.info(`CSRF Token: ${token || 'Not found'}`);
 
-    // Fill in login form
+    // Fill in login form - try multiple selectors
     consola.info('Filling login form...');
-    await page.type('#card-email', IVAS_EMAIL, { delay: 50 });
-    await page.type('#card-password', IVAS_PASSWORD, { delay: 50 });
+    
+    // Email field
+    const emailField = await page.$('#card-email') || await page.$('input[name="email"]');
+    if (emailField) {
+      await emailField.click({ clickCount: 3 });
+      await emailField.type(IVAS_EMAIL, { delay: 100 });
+      consola.info('Email filled');
+    } else {
+      consola.warn('Email field not found');
+    }
 
-    // Check "Remember me"
+    // Password field
+    const passwordField = await page.$('#card-password') || await page.$('input[name="password"]');
+    if (passwordField) {
+      await passwordField.click({ clickCount: 3 });
+      await passwordField.type(IVAS_PASSWORD, { delay: 100 });
+      consola.info('Password filled');
+    } else {
+      consola.warn('Password field not found');
+    }
+
+    // Check "Remember me" if available
     try {
-      await page.click('#card-checkbox');
-      consola.info('Checked "Remember me"');
+      const rememberCheckbox = await page.$('#card-checkbox');
+      if (rememberCheckbox) {
+        await rememberCheckbox.click();
+        consola.info('Checked "Remember me"');
+      }
     } catch (e) {
       consola.warn('Could not check "Remember me"');
     }
@@ -175,52 +261,37 @@ async function authenticate(page) {
     // Handle Cloudflare Turnstile
     consola.info('Handling Cloudflare Turnstile...');
     
-    // Wait for Turnstile iframe to load
-    await page.waitForSelector('.cf-turnstile', { timeout: 15000 }).catch(() => {
-      consola.warn('Turnstile not found, proceeding anyway...');
+    // Check for Turnstile
+    const hasTurnstile = await page.evaluate(() => {
+      return !!document.querySelector('.cf-turnstile');
     });
+    consola.info(`Turnstile present: ${hasTurnstile}`);
 
-    // Wait for Turnstile to complete (it auto-solves)
-    consola.info('Waiting for Turnstile to auto-solve...');
-    await delay(8); // Give Turnstile time to solve
-
-    // Check if Turnstile is solved
-    const turnstileSolved = await page.evaluate(() => {
-      const turnstileWidget = document.querySelector('.cf-turnstile iframe');
-      if (!turnstileWidget) return false;
-      
-      // Check for success indicator
-      const turnstileInput = document.querySelector('[name="cf-turnstile-response"]');
-      if (turnstileInput && turnstileInput.value && turnstileInput.value.length > 0) {
-        return true;
-      }
-      return false;
-    });
-
-    consola.info(`Turnstile solved: ${turnstileSolved}`);
+    if (hasTurnstile) {
+      consola.info('Waiting for Turnstile to auto-solve...');
+      await delay(10); // Give Turnstile more time
+    }
 
     // Submit the form
     consola.info('Submitting login form...');
     
-    // Try multiple submit methods
-    try {
-      // Method 1: Click submit button
-      const submitBtn = await page.$('button[type="submit"]');
-      if (submitBtn) {
-        await submitBtn.click();
-      } else {
-        // Method 2: JavaScript submit
-        await page.evaluate(() => {
-          const form = document.querySelector('form');
-          if (form) form.submit();
-        });
-      }
-    } catch (e) {
-      consola.warn('Submit failed, trying alternative...');
+    let submitted = false;
+    
+    // Method 1: Click submit button
+    const submitBtn = await page.$('button[type="submit"]');
+    if (submitBtn) {
+      await submitBtn.click();
+      submitted = true;
+      consola.info('Clicked submit button');
+    }
+    
+    // Method 2: Try form submit if button didn't work
+    if (!submitted) {
       await page.evaluate(() => {
         const form = document.querySelector('form');
         if (form) form.submit();
       });
+      consola.info('Used JavaScript form submit');
     }
 
     // Wait for navigation
@@ -232,16 +303,19 @@ async function authenticate(page) {
       consola.warn('Navigation timeout:', e.message);
     });
 
-    const currentUrl = page.url();
-    consola.info(`Current URL after login: ${currentUrl}`);
+    // Check result
+    const finalUrl = page.url();
+    consola.info(`Final URL after login: ${finalUrl}`);
     
-    // Check if login was successful
-    if (currentUrl.includes('/portal') || currentUrl.includes('/dashboard')) {
+    // Take screenshot after login attempt
+    await page.screenshot({ path: 'login-result.png' }).catch(() => {});
+
+    if (finalUrl.includes('/portal') || finalUrl.includes('/dashboard')) {
       consola.success('Authentication successful!');
       
       authCookies = await page.cookies();
       authSession = {
-        url: currentUrl,
+        url: finalUrl,
         timestamp: Date.now()
       };
       
@@ -254,7 +328,8 @@ async function authenticate(page) {
           '.alert-error', 
           '.invalid-feedback', 
           '.text-danger',
-          '.alert'
+          '.alert',
+          '.error-message'
         ];
         for (const selector of selectors) {
           const el = document.querySelector(selector);
@@ -263,7 +338,12 @@ async function authenticate(page) {
         return null;
       });
       
-      consola.error('Authentication failed:', errorMessage || 'Unknown error');
+      if (errorMessage) {
+        consola.error('Authentication failed:', errorMessage);
+      } else {
+        consola.error('Authentication failed: Unknown error');
+      }
+      
       return false;
     }
   } catch (error) {
@@ -667,28 +747,14 @@ app.get('/api/top-apps', async (req, res) => {
   }
 });
 
-// Test login endpoint
+// Login endpoint
 app.post('/api/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    
-    const useEmail = email || IVAS_EMAIL;
-    const usePassword = password || IVAS_PASSWORD;
-    
-    if (!useEmail || !usePassword) {
-      return res.status(400).json({
-        success: false,
-        error: 'Email and password required'
-      });
-    }
-    
-    consola.info(`Login attempt for: ${useEmail}`);
-    
     const browserInstance = await getBrowser();
     const page = await browserInstance.newPage();
     
     try {
-      // Set viewport for better compatibility
+      // Set viewport
       await page.setViewport({ width: 1280, height: 800 });
       
       const success = await authenticate(page);
