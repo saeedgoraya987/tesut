@@ -20,7 +20,7 @@ const TWO_CAPTCHA_API_KEY = process.env.TWO_CAPTCHA_API_KEY || 'd40a0b8b967f22dc
 
 // Enable trust proxy for Railway
 const app = express();
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 
 // ============ HELPER FUNCTIONS ============
 function delay(seconds) {
@@ -38,7 +38,6 @@ class TwoCaptchaSolver {
     consola.info('Submitting Turnstile challenge to 2captcha...');
     
     try {
-      // Submit captcha to 2captcha
       const submitResponse = await axios.post(`${this.baseUrl}/in.php`, null, {
         params: {
           key: this.apiKey,
@@ -56,12 +55,11 @@ class TwoCaptchaSolver {
       const captchaId = submitResponse.data.request;
       consola.info(`Captcha submitted, ID: ${captchaId}`);
 
-      // Wait for solution
       let attempts = 0;
-      const maxAttempts = 60; // 60 * 5 seconds = 5 minutes max
+      const maxAttempts = 60;
 
       while (attempts < maxAttempts) {
-        await delay(5); // Wait 5 seconds between checks
+        await delay(5);
         
         const resultResponse = await axios.get(`${this.baseUrl}/res.php`, {
           params: {
@@ -90,111 +88,6 @@ class TwoCaptchaSolver {
     } catch (error) {
       consola.error('2captcha error:', error.message);
       throw error;
-    }
-  }
-
-  async solveCloudflare(page) {
-    consola.info('Detecting Cloudflare challenge...');
-    
-    try {
-      // Check if it's a Cloudflare challenge
-      const isCloudflare = await page.evaluate(() => {
-        const title = document.title;
-        return title.includes('Just a moment') || 
-               title.includes('Cloudflare') || 
-               title.includes('Attention Required');
-      });
-
-      if (!isCloudflare) {
-        consola.info('No Cloudflare challenge detected');
-        return true;
-      }
-
-      consola.info('Cloudflare challenge detected, solving with 2captcha...');
-      
-      // Get the site key
-      const siteKey = await page.evaluate(() => {
-        // Look for Turnstile site key
-        const turnstileElement = document.querySelector('.cf-turnstile');
-        if (turnstileElement) {
-          return turnstileElement.getAttribute('data-sitekey');
-        }
-        
-        // Look for it in script tags
-        const scripts = document.querySelectorAll('script');
-        for (const script of scripts) {
-          const content = script.textContent || '';
-          const match = content.match(/sitekey:\s*['"]([^'"]+)['"]/);
-          if (match) return match[1];
-        }
-        
-        // Common site keys
-        const commonKeys = [
-          '0x4AAAAAACqVmW6ncA-jc10z',
-          '0x4AAAAAACqVmW6ncA-jc10z'
-        ];
-        return commonKeys[0];
-      });
-
-      consola.info(`Found site key: ${siteKey}`);
-
-      // Solve with 2captcha
-      const pageUrl = page.url();
-      const token = await this.solveTurnstile(siteKey, pageUrl);
-
-      // Inject the token
-      await page.evaluate((token) => {
-        // Try to find Turnstile input
-        const turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
-        if (turnstileInput) {
-          turnstileInput.value = token;
-          // Trigger change event
-          turnstileInput.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }, token);
-
-      consola.info('Token injected, waiting for verification...');
-      await delay(3);
-
-      // Try to submit the form if it's a login page
-      const isLoginPage = page.url().includes('/login');
-      if (isLoginPage) {
-        await page.evaluate(() => {
-          const form = document.querySelector('form');
-          if (form) form.submit();
-        });
-        await delay(3);
-      } else {
-        // For Cloudflare challenge page, click the submit or refresh
-        await page.evaluate(() => {
-          const submitBtn = document.querySelector('button[type="submit"], .challenge-submit, #challenge-form input[type="submit"]');
-          if (submitBtn) submitBtn.click();
-        });
-        await delay(3);
-      }
-
-      // Check if solved
-      const solved = await page.evaluate(() => {
-        const title = document.title;
-        return !title.includes('Just a moment') && 
-               !title.includes('Cloudflare') && 
-               !title.includes('Attention Required');
-      });
-
-      if (solved) {
-        consola.success('Cloudflare challenge solved successfully!');
-        return true;
-      }
-
-      // If not solved, try refreshing
-      consola.info('Challenge not solved, refreshing...');
-      await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
-      await delay(3);
-
-      return true;
-    } catch (error) {
-      consola.error('Error solving Cloudflare:', error.message);
-      return false;
     }
   }
 }
@@ -279,7 +172,7 @@ async function getBrowser() {
   return browser;
 }
 
-// ============ AUTHENTICATION WITH 2CAPTCHA ============
+// ============ AUTHENTICATION ============
 async function authenticate(page) {
   if (authCookies && authSession) {
     consola.info('Using existing session');
@@ -296,37 +189,27 @@ async function authenticate(page) {
     throw new Error('Please set TWO_CAPTCHA_API_KEY environment variable');
   }
 
-  // Initialize captcha solver
-  if (!captchaSolver) {
-    captchaSolver = new TwoCaptchaSolver(TWO_CAPTCHA_API_KEY);
-  }
-
   consola.info('Authenticating to iVAS...');
   
   try {
+    // Initialize captcha solver
+    if (!captchaSolver) {
+      captchaSolver = new TwoCaptchaSolver(TWO_CAPTCHA_API_KEY);
+    }
+
     // Navigate to login page
     consola.info('Navigating to login page...');
-    await page.goto(`${baseUrl}/login`, {
+    const response = await page.goto(`${baseUrl}/login`, {
       waitUntil: 'networkidle2',
       timeout: 60000
     });
 
+    consola.info(`Response status: ${response ? response.status() : 'No response'}`);
+    
+    // Wait for page to load
     await delay(3);
 
-    // Check for Cloudflare challenge
-    const title = await page.title();
-    consola.info(`Page title: ${title}`);
-    
-    if (title.includes('Just a moment') || title.includes('Cloudflare')) {
-      consola.info('Cloudflare detected, solving with 2captcha...');
-      const solved = await captchaSolver.solveCloudflare(page);
-      if (!solved) {
-        throw new Error('Failed to solve Cloudflare challenge');
-      }
-      await delay(3);
-    }
-
-    // Check current URL after Cloudflare
+    // Check if we're already logged in
     const currentUrl = page.url();
     consola.info(`Current URL: ${currentUrl}`);
     
@@ -337,19 +220,29 @@ async function authenticate(page) {
       return true;
     }
 
-    // Wait for login form
-    await page.waitForSelector('form, #card-email', { 
-      timeout: 30000,
-      visible: true 
-    }).catch(() => {
-      consola.warn('Login form not found');
+    // Wait for the page to fully render
+    await page.waitForSelector('form', { timeout: 30000 }).catch(() => {
+      consola.warn('Form not found, continuing...');
     });
+
+    // Get CSRF token
+    const csrfToken = await page.evaluate(() => {
+      const tokenInput = document.querySelector('input[name="_token"]');
+      return tokenInput ? tokenInput.value : null;
+    });
+    consola.info(`CSRF Token: ${csrfToken || 'Not found'}`);
+
+    // Check for Turnstile
+    const hasTurnstile = await page.evaluate(() => {
+      return !!document.querySelector('.cf-turnstile');
+    });
+    consola.info(`Turnstile present: ${hasTurnstile}`);
 
     // Fill credentials
     consola.info('Filling credentials...');
     
     // Email
-    const emailField = await page.$('#card-email') || await page.$('input[name="email"]');
+    const emailField = await page.$('#card-email');
     if (emailField) {
       await emailField.click({ clickCount: 3 });
       await emailField.type(IVAS_EMAIL, { delay: 50 });
@@ -357,60 +250,137 @@ async function authenticate(page) {
     }
 
     // Password
-    const passwordField = await page.$('#card-password') || await page.$('input[name="password"]');
+    const passwordField = await page.$('#card-password');
     if (passwordField) {
       await passwordField.click({ clickCount: 3 });
       await passwordField.type(IVAS_PASSWORD, { delay: 50 });
       consola.info('Password filled');
     }
 
-    // Check for Turnstile on login form
-    const hasTurnstile = await page.evaluate(() => {
-      return !!document.querySelector('.cf-turnstile');
-    });
+    // Check "Remember me"
+    try {
+      await page.click('#card-checkbox');
+      consola.info('Checked "Remember me"');
+    } catch (e) {
+      consola.warn('Could not check "Remember me"');
+    }
 
+    // Handle Turnstile if present
     if (hasTurnstile) {
-      consola.info('Turnstile detected on login form, solving...');
+      consola.info('Solving Turnstile...');
       
-      // Get site key
-      const siteKey = await page.evaluate(() => {
-        const el = document.querySelector('.cf-turnstile');
-        return el ? el.getAttribute('data-sitekey') : '0x4AAAAAACqVmW6ncA-jc10z';
-      });
-      
+      const siteKey = '0x4AAAAAACqVmW6ncA-jc10z';
       const pageUrl = page.url();
       const token = await captchaSolver.solveTurnstile(siteKey, pageUrl);
       
-      // Inject token
-      await page.evaluate((token) => {
-        const input = document.querySelector('input[name="cf-turnstile-response"]');
+      consola.info(`Token received: ${token.substring(0, 20)}...`);
+
+      // Find the Turnstile input and set the token
+      const tokenInjected = await page.evaluate((token) => {
+        // Try multiple methods to inject the token
+        
+        // Method 1: Find the Turnstile response input
+        let input = document.querySelector('input[name="cf-turnstile-response"]');
         if (input) {
           input.value = token;
           input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          return true;
         }
+
+        // Method 2: Try to find the Turnstile widget and call the callback
+        const turnstileWidget = document.querySelector('.cf-turnstile');
+        if (turnstileWidget) {
+          // Try to find the Turnstile iframe and its callback
+          const iframes = document.querySelectorAll('iframe');
+          for (const iframe of iframes) {
+            if (iframe.src && iframe.src.includes('challenges.cloudflare.com')) {
+              // Send message to iframe
+              try {
+                iframe.contentWindow.postMessage({
+                  type: 'turnstile-callback',
+                  token: token
+                }, '*');
+              } catch (e) {
+                // Ignore cross-origin errors
+              }
+            }
+          }
+          
+          // Call the global turnstile callback if available
+          if (window.turnstile && typeof window.turnstile.render === 'function') {
+            try {
+              // Find the widget ID
+              const widgetId = turnstileWidget.getAttribute('data-widget-id');
+              if (widgetId) {
+                window.turnstile.render(widgetId, { callback: function(t) {} });
+              }
+            } catch (e) {}
+          }
+          
+          return true;
+        }
+
+        // Method 3: Find any input with turnstile in the name
+        const allInputs = document.querySelectorAll('input');
+        for (const inp of allInputs) {
+          if (inp.name && inp.name.toLowerCase().includes('turnstile')) {
+            inp.value = token;
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          }
+        }
+
+        return false;
       }, token);
-      
-      consola.info('Turnstile token injected');
-      await delay(2);
+
+      consola.info(`Token injection result: ${tokenInjected}`);
+
+      // Wait a moment for Turnstile to process
+      await delay(3);
+
+      // Verify the token was set
+      const tokenSet = await page.evaluate(() => {
+        const input = document.querySelector('input[name="cf-turnstile-response"]');
+        return input ? input.value && input.value.length > 0 : false;
+      });
+
+      consola.info(`Token set in form: ${tokenSet}`);
     }
 
-    // Submit form
-    consola.info('Submitting form...');
+    // Submit the form
+    consola.info('Submitting login form...');
+    
+    // Try multiple submit methods
+    let submitted = false;
+    
+    // Method 1: Click submit button
     const submitBtn = await page.$('button[type="submit"]');
     if (submitBtn) {
       await submitBtn.click();
-    } else {
+      submitted = true;
+      consola.info('Clicked submit button');
+    }
+    
+    // Method 2: JavaScript submit
+    if (!submitted) {
       await page.evaluate(() => {
         const form = document.querySelector('form');
-        if (form) form.submit();
+        if (form) {
+          form.submit();
+        }
       });
+      consola.info('Used JavaScript form submit');
     }
 
     // Wait for navigation
+    consola.info('Waiting for navigation...');
     await page.waitForNavigation({
       waitUntil: 'networkidle2',
       timeout: 30000
-    }).catch(() => consola.warn('Navigation timeout'));
+    }).catch((e) => {
+      consola.warn('Navigation timeout:', e.message);
+    });
 
     const finalUrl = page.url();
     consola.info(`Final URL: ${finalUrl}`);
@@ -420,6 +390,22 @@ async function authenticate(page) {
       authCookies = await page.cookies();
       authSession = { url: finalUrl, timestamp: Date.now() };
       return true;
+    }
+
+    // Check for error message
+    const errorMessage = await page.evaluate(() => {
+      const selectors = ['.alert-danger', '.alert-error', '.invalid-feedback', '.text-danger'];
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el) return el.textContent?.trim();
+      }
+      return null;
+    });
+
+    if (errorMessage) {
+      consola.error('Login failed:', errorMessage);
+    } else {
+      consola.error('Login failed: Unknown error');
     }
 
     return false;
@@ -586,7 +572,8 @@ const limiter = rateLimit({
   max: 50,
   skip: (req) => req.path === '/health',
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  trustProxy: false
 });
 
 app.use(cors());
