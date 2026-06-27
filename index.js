@@ -5,6 +5,8 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { consola } from 'consola';
 import rateLimit from 'express-rate-limit';
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
 
 // Use stealth plugin to bypass Cloudflare
 puppeteer.use(StealthPlugin());
@@ -172,6 +174,144 @@ async function getBrowser() {
   return browser;
 }
 
+// ============ DEBUG FUNCTION ============
+async function debugPage(page, url) {
+  consola.info('========== DEBUG START ==========');
+  consola.info(`Target URL: ${url}`);
+  
+  try {
+    // Navigate with detailed options
+    const response = await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout: 30000
+    });
+
+    consola.info(`Response status: ${response ? response.status() : 'No response'}`);
+    consola.info(`Response headers: ${JSON.stringify(response ? response.headers() : {}, null, 2)}`);
+
+    // Wait a moment for any JavaScript to execute
+    await delay(3);
+
+    // Get page information
+    const pageInfo = await page.evaluate(() => {
+      return {
+        title: document.title,
+        url: window.location.href,
+        bodyText: document.body.innerText.substring(0, 2000),
+        bodyHTML: document.documentElement.outerHTML.substring(0, 5000),
+        hasCloudflare: document.body.innerText.includes('Cloudflare') || 
+                       document.body.innerText.includes('Just a moment') ||
+                       document.body.innerText.includes('Attention Required'),
+        forms: Array.from(document.querySelectorAll('form')).map(form => ({
+          action: form.action,
+          method: form.method,
+          inputs: Array.from(form.querySelectorAll('input')).map(input => ({
+            name: input.name,
+            type: input.type,
+            id: input.id
+          }))
+        })),
+        turnstile: !!document.querySelector('.cf-turnstile'),
+        hcaptcha: !!document.querySelector('.h-captcha'),
+        recaptcha: !!document.querySelector('.g-recaptcha'),
+        metaTags: Array.from(document.querySelectorAll('meta')).map(meta => ({
+          name: meta.name,
+          content: meta.content
+        })),
+        scripts: Array.from(document.querySelectorAll('script')).map(script => ({
+          src: script.src,
+          type: script.type
+        })).slice(0, 10),
+        cookies: document.cookie
+      };
+    });
+
+    // Log page info
+    consola.info(`Page Title: ${pageInfo.title}`);
+    consola.info(`Page URL: ${pageInfo.url}`);
+    consola.info(`Has Cloudflare: ${pageInfo.hasCloudflare}`);
+    consola.info(`Has Turnstile: ${pageInfo.turnstile}`);
+    consola.info(`Has hCaptcha: ${pageInfo.hcaptcha}`);
+    consola.info(`Has reCAPTCHA: ${pageInfo.recaptcha}`);
+    consola.info(`Number of forms: ${pageInfo.forms.length}`);
+    consola.info(`Cookies: ${pageInfo.cookies}`);
+
+    // Log form details
+    if (pageInfo.forms.length > 0) {
+      pageInfo.forms.forEach((form, index) => {
+        consola.info(`Form ${index + 1}: action=${form.action}, method=${form.method}`);
+        form.inputs.forEach(input => {
+          consola.info(`  Input: name=${input.name}, type=${input.type}, id=${input.id}`);
+        });
+      });
+    }
+
+    // Take screenshot
+    const screenshotPath = '/tmp/debug-screenshot.png';
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    consola.info(`Screenshot saved to: ${screenshotPath}`);
+
+    // Save HTML content to file
+    const htmlPath = '/tmp/debug-page.html';
+    fs.writeFileSync(htmlPath, pageInfo.bodyHTML);
+    consola.info(`HTML saved to: ${htmlPath}`);
+
+    // Check for Cloudflare challenge
+    if (pageInfo.hasCloudflare) {
+      consola.warn('Cloudflare challenge detected!');
+      
+      // Try to find the challenge iframe
+      const iframeInfo = await page.evaluate(() => {
+        const iframes = document.querySelectorAll('iframe');
+        return Array.from(iframes).map(iframe => ({
+          src: iframe.src,
+          id: iframe.id,
+          className: iframe.className
+        }));
+      });
+      
+      consola.info(`Iframes found: ${JSON.stringify(iframeInfo, null, 2)}`);
+
+      // Look for Turnstile site key
+      const siteKey = await page.evaluate(() => {
+        // Check for Turnstile
+        const turnstile = document.querySelector('.cf-turnstile');
+        if (turnstile) {
+          return turnstile.getAttribute('data-sitekey');
+        }
+        
+        // Check in script tags
+        const scripts = document.querySelectorAll('script');
+        for (const script of scripts) {
+          const content = script.textContent || '';
+          const match = content.match(/sitekey\s*[:=]\s*['"]([^'"]+)['"]/);
+          if (match) return match[1];
+        }
+        
+        return null;
+      });
+      
+      consola.info(`Turnstile Site Key: ${siteKey || 'Not found'}`);
+    }
+
+    consola.info('========== DEBUG END ==========');
+    
+    return pageInfo;
+  } catch (error) {
+    consola.error('Debug error:', error.message);
+    
+    // Try to get whatever we can
+    try {
+      const content = await page.content();
+      consola.info('Page content (partial):', content.substring(0, 1000));
+    } catch (e) {
+      consola.error('Could not get page content');
+    }
+    
+    throw error;
+  }
+}
+
 // ============ AUTHENTICATION ============
 async function authenticate(page) {
   if (authCookies && authSession) {
@@ -182,11 +322,6 @@ async function authenticate(page) {
   if (!IVAS_EMAIL || !IVAS_PASSWORD) {
     consola.error('Credentials not set');
     throw new Error('Missing credentials.');
-  }
-
-  if (!TWO_CAPTCHA_API_KEY || TWO_CAPTCHA_API_KEY === 'YOUR_2CAPTCHA_API_KEY') {
-    consola.error('2captcha API key not set');
-    throw new Error('Please set TWO_CAPTCHA_API_KEY environment variable');
   }
 
   consola.info('Authenticating to iVAS...');
@@ -205,6 +340,30 @@ async function authenticate(page) {
     });
 
     consola.info(`Response status: ${response ? response.status() : 'No response'}`);
+    
+    // If 403, try to debug
+    if (response && response.status() === 403) {
+      consola.warn('Received 403 Forbidden - likely Cloudflare blocking');
+      
+      // Try to get page content anyway
+      try {
+        const content = await page.content();
+        consola.info('Page content sample:', content.substring(0, 500));
+      } catch (e) {
+        consola.error('Could not get page content');
+      }
+      
+      // Try with different user agent
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+      await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+      
+      const newResponse = await page.goto(`${baseUrl}/login`, {
+        waitUntil: 'networkidle2',
+        timeout: 30000
+      });
+      
+      consola.info(`New response status: ${newResponse ? newResponse.status() : 'No response'}`);
+    }
     
     // Wait for page to load
     await delay(3);
@@ -275,86 +434,27 @@ async function authenticate(page) {
       
       consola.info(`Token received: ${token.substring(0, 20)}...`);
 
-      // Find the Turnstile input and set the token
+      // Inject the token
       const tokenInjected = await page.evaluate((token) => {
-        // Try multiple methods to inject the token
-        
-        // Method 1: Find the Turnstile response input
-        let input = document.querySelector('input[name="cf-turnstile-response"]');
+        const input = document.querySelector('input[name="cf-turnstile-response"]');
         if (input) {
           input.value = token;
           input.dispatchEvent(new Event('change', { bubbles: true }));
           input.dispatchEvent(new Event('input', { bubbles: true }));
           return true;
         }
-
-        // Method 2: Try to find the Turnstile widget and call the callback
-        const turnstileWidget = document.querySelector('.cf-turnstile');
-        if (turnstileWidget) {
-          // Try to find the Turnstile iframe and its callback
-          const iframes = document.querySelectorAll('iframe');
-          for (const iframe of iframes) {
-            if (iframe.src && iframe.src.includes('challenges.cloudflare.com')) {
-              // Send message to iframe
-              try {
-                iframe.contentWindow.postMessage({
-                  type: 'turnstile-callback',
-                  token: token
-                }, '*');
-              } catch (e) {
-                // Ignore cross-origin errors
-              }
-            }
-          }
-          
-          // Call the global turnstile callback if available
-          if (window.turnstile && typeof window.turnstile.render === 'function') {
-            try {
-              // Find the widget ID
-              const widgetId = turnstileWidget.getAttribute('data-widget-id');
-              if (widgetId) {
-                window.turnstile.render(widgetId, { callback: function(t) {} });
-              }
-            } catch (e) {}
-          }
-          
-          return true;
-        }
-
-        // Method 3: Find any input with turnstile in the name
-        const allInputs = document.querySelectorAll('input');
-        for (const inp of allInputs) {
-          if (inp.name && inp.name.toLowerCase().includes('turnstile')) {
-            inp.value = token;
-            inp.dispatchEvent(new Event('change', { bubbles: true }));
-            return true;
-          }
-        }
-
         return false;
       }, token);
 
       consola.info(`Token injection result: ${tokenInjected}`);
-
-      // Wait a moment for Turnstile to process
       await delay(3);
-
-      // Verify the token was set
-      const tokenSet = await page.evaluate(() => {
-        const input = document.querySelector('input[name="cf-turnstile-response"]');
-        return input ? input.value && input.value.length > 0 : false;
-      });
-
-      consola.info(`Token set in form: ${tokenSet}`);
     }
 
     // Submit the form
     consola.info('Submitting login form...');
     
-    // Try multiple submit methods
     let submitted = false;
     
-    // Method 1: Click submit button
     const submitBtn = await page.$('button[type="submit"]');
     if (submitBtn) {
       await submitBtn.click();
@@ -362,7 +462,6 @@ async function authenticate(page) {
       consola.info('Clicked submit button');
     }
     
-    // Method 2: JavaScript submit
     if (!submitted) {
       await page.evaluate(() => {
         const form = document.querySelector('form');
@@ -390,22 +489,6 @@ async function authenticate(page) {
       authCookies = await page.cookies();
       authSession = { url: finalUrl, timestamp: Date.now() };
       return true;
-    }
-
-    // Check for error message
-    const errorMessage = await page.evaluate(() => {
-      const selectors = ['.alert-danger', '.alert-error', '.invalid-feedback', '.text-danger'];
-      for (const selector of selectors) {
-        const el = document.querySelector(selector);
-        if (el) return el.textContent?.trim();
-      }
-      return null;
-    });
-
-    if (errorMessage) {
-      consola.error('Login failed:', errorMessage);
-    } else {
-      consola.error('Login failed: Unknown error');
     }
 
     return false;
@@ -570,7 +653,7 @@ async function checkLoginStatus() {
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 50,
-  skip: (req) => req.path === '/health',
+  skip: (req) => req.path === '/health' || req.path === '/debug',
   standardHeaders: true,
   legacyHeaders: false,
   trustProxy: false
@@ -592,6 +675,37 @@ app.get('/health', async (req, res) => {
     email: IVAS_EMAIL ? 'Set' : 'Not set',
     captcha_key: TWO_CAPTCHA_API_KEY ? 'Set' : 'Not set'
   });
+});
+
+// ============ DEBUG ENDPOINT ============
+app.get('/api/debug', async (req, res) => {
+  try {
+    const url = req.query.url || 'https://www.ivasms.com/login';
+    consola.info(`Debug endpoint called for URL: ${url}`);
+    
+    const browserInstance = await getBrowser();
+    const page = await browserInstance.newPage();
+    
+    try {
+      const debugInfo = await debugPage(page, url);
+      
+      res.json({
+        success: true,
+        url: url,
+        debug: debugInfo,
+        timestamp: new Date().toISOString()
+      });
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } catch (error) {
+    consola.error('Debug error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: error.stack
+    });
+  }
 });
 
 // ============ API ENDPOINTS ============
@@ -671,6 +785,7 @@ app.post('/api/cleanup', async (req, res) => {
 const server = app.listen(PORT, '0.0.0.0', () => {
   consola.success(`🚀 Server running on port ${PORT}`);
   consola.info(`📍 Health check: http://localhost:${PORT}/health`);
+  consola.info(`🔍 Debug endpoint: http://localhost:${PORT}/api/debug?url=https://www.ivasms.com/login`);
   consola.info(`📱 API endpoints available at /api/`);
   consola.info(`📧 Email: ${IVAS_EMAIL ? 'Set' : 'NOT SET'}`);
   consola.info(`🔑 Password: ${IVAS_PASSWORD ? 'Set' : 'NOT SET'}`);
