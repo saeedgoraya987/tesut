@@ -1,12 +1,13 @@
 {
-  "name": "sms-receiver-service",
+  "name": "ivas-sms-monitor",
   "version": "1.0.0",
-  "description": "SMS receiver service for OTP verification",
+  "description": "iVAS Premium SMS Platform Monitor - Dashboard API for SMS traffic monetization",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "node --watch index.js",
+    "build": "echo 'No build step required'"
   },
   "dependencies": {
     "puppeteer-extra": "^3.3.6",
@@ -19,5 +20,15 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "keywords": [
+    "ivas",
+    "sms",
+    "monetization",
+    "premium-sms",
+    "dashboard",
+    "api"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
 }
